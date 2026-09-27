@@ -1189,6 +1189,33 @@ document.getElementById("app").addEventListener("click", function(e){
 const DEMO_ALERTS = [];
 let liveAlerts = [];
 function activeAlerts(){ return DEMO_ALERTS.concat(liveAlerts); }
+// Known, fixed BART schedule rules (published service patterns, not derived from live data) -- asked for
+// 2026-09-27 so a line with zero live data can be explained as "this is normal, it just doesn't run right
+// now by schedule" instead of the vaguer "may be suspended or delayed." Green Line (Berryessa <-> Daly City)
+// is currently a weekday commute-hours-only line with no weekend or evening service, which is exactly why it
+// shows zero estimates on a Sunday -- that's expected, not an outage.
+const SCHEDULE_RULES = {
+  green: {
+    weekdayOnly: true,
+    commuteHoursOnly: true,
+    // roughly BART's published AM/PM commute windows; used only to decide which message to show, not to
+    // hide/show trains -- live data always wins if trains actually appear outside these hours.
+    startHour: 5, endHour: 21,
+    note: "Green Line runs on weekdays during commute hours only — no weekend or evening service."
+  }
+};
+function scheduleNote(lid){
+  const rule = SCHEDULE_RULES[lid];
+  if(!rule) return null;
+  const now = new Date();
+  const day = now.getDay(); // 0=Sun .. 6=Sat
+  const hour = now.getHours();
+  const isWeekend = day===0 || day===6;
+  const outsideHours = hour<rule.startHour || hour>=rule.endHour;
+  if(rule.weekdayOnly && isWeekend) return rule.note;
+  if(rule.commuteHoursOnly && !isWeekend && outsideHours) return rule.note;
+  return null;
+}
 function computeLiveAlerts(){
   if(!liveMode){ liveAlerts = []; return; }
   const seenLines = {};
@@ -1196,8 +1223,9 @@ function computeLiveAlerts(){
     etdByStation[sid].forEach(function(e){ seenLines[e.lineId] = true; });
   });
   liveAlerts = Object.keys(LINES).filter(function(lid){ return lid!=="beige" && !seenLines[lid]; }).map(function(lid){
+    const note = scheduleNote(lid);
     return { id:"live-"+lid, type:"delay", scope:"line", lineId:lid,
-      text:"실시간 열차 정보가 없습니다 — 운행이 중단되었거나 지연되고 있을 수 있습니다." };
+      text: note || "No live train data right now — service may be suspended or delayed." };
   });
 }
 function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
@@ -1212,8 +1240,15 @@ function renderAlertsPanel(){
   const list = document.getElementById("alertsList");
   const alerts = activeAlerts();
   list.innerHTML = alerts.length ? alerts.map(function(a){
-    const scopeLabel = a.scope==="line" ? LINES[a.lineId].name : (a.scope==="station" ? STATIONS[a.stationId].name : "Systemwide");
-    return '<div class="item"><span class="ic">'+alertIcon(a.type)+'</span><div><strong>'+scopeLabel+'</strong><br>'+a.text+'</div></div>';
+    // For a line-scope alert, lead with a colored dot in the line's own color plus its plain color name
+    // only (e.g. "Green Line") -- previously this appended the route name in parens ("Green Line
+    // (Berryessa - Daly City)"), which read like the alert itself was titled "Berryessa and Daly City" --
+    // confusing as a section header. Fixed 2026-09-27 per user report: just the color name identifies which
+    // line on the map this is about, nothing more is needed in the header.
+    const lineChip = a.scope==="line" ? '<span class="chip" style="background:'+LINES[a.lineId].color+';display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;"></span>' : '';
+    const scopeLabel = a.scope==="line" ? (a.lineId.charAt(0).toUpperCase()+a.lineId.slice(1)+" Line")
+      : (a.scope==="station" ? STATIONS[a.stationId].name : "Systemwide");
+    return '<div class="item"><span class="ic">'+alertIcon(a.type)+'</span><div><strong>'+lineChip+scopeLabel+'</strong><br>'+a.text+'</div></div>';
   }).join("") : '<div class="empty">No active alerts.</div>';
   alertsIconBtn.classList.toggle("hidden", !alerts.length);
 }
@@ -1300,13 +1335,41 @@ function closePopup(){
   focusedStation=null;
 }
 document.getElementById("popupClose").addEventListener("click", closePopup);
+// BART's real-time ETD API has NO data at all for the Oakland Airport Connector -- confirmed 2026-09-27
+// by querying BART directly: COLS's own destination list never includes "Oakland Airport", and OAKL's own
+// ETD query comes back with an explicit "No data matched your criteria." This isn't just missing GPS
+// position -- there's no next-departure time, no wait estimate, nothing to compute an animated train from.
+// So instead of a live "X min" row (which we have no data for), show BART's own published schedule --
+// but still react to the actual current time, the way a real live row would, rather than one fixed
+// sentence always shown the same way regardless of whether the connector is even running right now:
+// - during its published operating hours: just the frequency ("Every 4-5 min"), like a live status
+// - outside those hours: "Not running right now" plus when it starts back up
+const OAK_HOURS_BY_DAY = { 0:[8,24], 6:[6,24] }; // Sun, Sat -- weekdays (1-5) default to [5,24] below
+function oakHoursForDay(day){ return OAK_HOURS_BY_DAY[day] || [5,24]; }
+function formatHour12(h){
+  const hh = ((h%24)+24)%24;
+  const period = hh<12 ? "AM" : "PM";
+  let disp = hh%12; if(disp===0) disp = 12;
+  return disp+" "+period;
+}
+function oakScheduleText(){
+  const now = new Date();
+  const [start, end] = oakHoursForDay(now.getDay());
+  const hour = now.getHours();
+  if(hour<start || hour>=end) return "Not running right now — next service starts "+formatHour12(start)+".";
+  return "Every 4–5 min.";
+}
 function renderPopupBody(sid){
   const st = STATIONS[sid];
   const alertHtml = alertsForStation(sid).map(function(a){
     return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+a.text+'</span></div>';
   }).join("");
   const rows = etdByStation[sid]||[];
-  if(!rows.length){ popupBody.innerHTML=alertHtml+'<div class="empty">No upcoming trains right now.</div>'; return; }
+  const oakScheduleHtml = '<div class="pheading">Oakland Airport</div><div class="prow">'+
+    '<span class="sw" style="background:'+LINES.beige.color+'"></span>'+
+    '<span class="dest">'+oakScheduleText()+'</span></div>';
+  if(sid==="OAKL"){ popupBody.innerHTML = alertHtml + oakScheduleHtml; return; }
+  if(!rows.length){ popupBody.innerHTML=alertHtml+'<div class="empty">No upcoming trains right now.</div>'+(sid==="COLS"?oakScheduleHtml:""); return; }
   const row = function(e){
     return '<div class="prow"><span class="sw" style="background:'+LINES[e.lineId].color+'"></span>'+
       '<span class="dest">'+e.destination+'</span><span class="min">'+e.minutesLabel+'</span></div>';
@@ -1388,6 +1451,13 @@ function renderPopupBody(sid){
     : axisNS ? ["Northbound","Southbound","Oakland Airport"] : ["Westbound","Eastbound","Oakland Airport"];
   let html = "";
   order.forEach(function(g){
+    if(g==="Oakland Airport"){
+      // groups["Oakland Airport"] will never actually get populated (see oakScheduleText note above --
+      // BART's live data never includes a beige row), so show the schedule text unconditionally at COLS
+      // instead of only when groups[g] happens to exist.
+      if(sid==="COLS") html += oakScheduleHtml;
+      return;
+    }
     if(!groups[g]) return;
     const list = groups[g].sort(function(a,b){ return a.minutesNum-b.minutesNum; }).slice(0,2);
     html += '<div class="pheading">'+g+'</div>' + list.map(row).join("");
@@ -1538,6 +1608,7 @@ function buildTrainMeta(){
       const m = e.minutesNum;
       if(m==null) return;
       const totalToDest = m + pathTimeMin(seq, oi, di!==-1 ? di : (sign===1 ? seq.length-1 : 0));
+      const rank = e.rank==null ? 0 : e.rank;
       let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
       // sid can BE the line's own origin terminus (e.g. a Millbrae-bound yellow train reported directly at
       // ANTC, yellow's own first station) -- there is no station "before" it on this line to walk back
@@ -1550,7 +1621,7 @@ function buildTrainMeta(){
       // hop) instead of dropping it -- it renders sitting at that station's dot, which is honest given we
       // have no finer-grained position for a train still at its own origin.
       if(prevIdx<0 || prevIdx>=seq.length){
-        placements.push({ lineId:lid, destination:e.destination, prevId:seq[oi], sid:seq[oi], minutesAtFetch:Math.min(m,1), hopMin:1, totalToDest:totalToDest, m:m });
+        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[oi], sid:seq[oi], minutesAtFetch:Math.min(m,1), hopMin:1, totalToDest:totalToDest, m:m });
         return;
       }
       while(prevIdx>=0 && prevIdx<seq.length && guard<40){
@@ -1563,29 +1634,66 @@ function buildTrainMeta(){
         prevIdx = nextPrevIdx;
       }
       if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
-      placements.push({ lineId:lid, destination:e.destination, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:remaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
+      placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:remaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
     });
   });
-  const byLineDest = {};
+  // Group by (line, destination, rank) instead of clustering on totalToDest proximity. Why this is correct
+  // and the old approach wasn't: BART's own estimate[] array at each station is already rank-ordered
+  // soonest-first, and trains physically cannot pass each other on a single track -- so "the Nth-soonest
+  // Millbrae-bound Red train reported by station A" and "the Nth-soonest Millbrae-bound Red train reported
+  // by station B" are guaranteed to be the SAME physical train, for any two stations A and B on that route,
+  // regardless of how far apart they are. The old code instead tried to recognize "same train" by checking
+  // whether two reports' computed totalToDest (m + a crude haversine-distance/0.9-km-per-min hop-time
+  // estimate) landed within +-2 minutes of each other -- fine for a short 2-3 hop chain, but confirmed
+  // (2026-09-27, using real captured Red-line data across all ~23 stations) to drift far more than 2 minutes
+  // over a full ~50-minute route, which fractured single real trains into many false "different" ones (32
+  // entries counted for Red instead of the ~6 expected from headway/route-time math). Grouping by rank needs
+  // no tolerance at all -- it's an exact match -- so this drift can't cause overcounting anymore.
+  const byGroup = {};
   placements.forEach(function(p){
-    const key = p.lineId+"|"+p.destination;
-    (byLineDest[key] = byLineDest[key]||[]).push(p);
+    const key = p.lineId+"|"+p.destination+"|"+p.rank;
+    (byGroup[key] = byGroup[key]||[]).push(p);
   });
   const meta = {};
-  Object.keys(byLineDest).forEach(function(key){
-    const list = byLineDest[key].sort(function(a,b){ return a.totalToDest-b.totalToDest; });
-    let clusterRep = null, clusterIdx = 0;
-    list.forEach(function(p){
-      if(!clusterRep || p.totalToDest-clusterRep.totalToDest>2){
-        clusterIdx++;
-        clusterRep = p;
-      } else if(p.m<clusterRep.m){
-        clusterRep = p; // a report closer to arrival is more current -- use its (more accurate) placement
-      }
-      meta[key+"|"+clusterIdx] = { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
-    });
+  Object.keys(byGroup).forEach(function(key){
+    // Within one (line, destination, rank) group, every entry is a report of the SAME physical train from a
+    // different reporting station -- pick the one with the smallest raw m (closest to arrival) as the
+    // representative, since the station nearest that train's current position gives the most accurate,
+    // most current placement.
+    let rep = null;
+    byGroup[key].forEach(function(p){ if(!rep || p.m<rep.m) rep = p; });
+    meta[key] = { lineId:rep.lineId, prevId:rep.prevId, sid:rep.sid, minutesAtFetch:rep.minutesAtFetch, hopMin:rep.hopMin, fetchTime:now };
   });
+  const shuttle = buildOakShuttleMeta(now);
+  if(shuttle) meta["beige|shuttle"] = shuttle;
   trainMeta = meta;
+}
+
+// BART's live data has nothing at all to place a real Oakland Airport Connector marker from (see
+// oakScheduleText above) -- but the user still wants SOMETHING moving on that short line, estimated purely
+// from BART's own published frequency (about every 4-5 min) rather than left blank. This is explicitly an
+// ESTIMATE, not a live-tracked train: it computes a deterministic back-and-forth cycle from wall-clock time
+// alone (a fresh shuttle "departs" every OAK_HEADWAY_MIN minutes, alternating direction each departure, and
+// takes OAK_HOP_MIN minutes to cross between COLS and OAKL), so different viewers loading the page at the
+// same moment see the same animated shuttle, without ever claiming it's real-time. Returns null outside the
+// connector's own published operating hours (oakHoursForDay) so nothing animates when it isn't running.
+const OAK_HEADWAY_MIN = 4.5; // BART's own published average wait
+const OAK_HOP_MIN = 1.5; // estimated one-way crossing time (not a real timed measurement)
+function buildOakShuttleMeta(now){
+  const d = new Date(now);
+  const [start, end] = oakHoursForDay(d.getDay());
+  const hour = d.getHours();
+  if(hour<start || hour>=end) return null;
+  const headwayMs = OAK_HEADWAY_MIN*60000;
+  const cycleIdx = Math.floor(now/headwayMs);
+  const phase = (now%headwayMs)/headwayMs; // 0..1 through the current headway cycle
+  const hopFrac = OAK_HOP_MIN/OAK_HEADWAY_MIN; // portion of the cycle actually spent crossing
+  if(phase>hopFrac) return null; // this cycle's shuttle already arrived -- nothing to animate until the next one
+  const minutesAtFetch = OAK_HOP_MIN*(1-phase/hopFrac); // countdown remaining in this crossing
+  const forward = cycleIdx%2===0; // alternate direction each departure, like a real back-and-forth shuttle
+  return forward
+    ? { lineId:"beige", prevId:"COLS", sid:"OAKL", minutesAtFetch:minutesAtFetch, hopMin:OAK_HOP_MIN, fetchTime:now }
+    : { lineId:"beige", prevId:"OAKL", sid:"COLS", minutesAtFetch:minutesAtFetch, hopMin:OAK_HOP_MIN, fetchTime:now };
 }
 
 async function fetchETD(){
@@ -1607,10 +1715,12 @@ async function fetchETD(){
         // BART's 2nd/3rd real estimates entirely; briefly slice(0,3), lowered to 2 on 2026-09-27 per user
         // request -- matches the popup's own "up to 2 per direction" rule and lets buildTrainMeta place
         // more than one real train on the map instead of just the soonest one, without over-fetching.
-        (etd.estimate||[]).slice(0,2).forEach(function(est){
+        (etd.estimate||[]).slice(0,2).forEach(function(est, rank){
           const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
           if(!lid) return;
-          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
+          // rank = this estimate's position within BART's OWN per-station list for this line+destination
+          // (0 = soonest at this station). See buildTrainMeta for why this replaces distance-based matching.
+          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes), rank:rank });
         });
       });
       next[sid]=rows;
@@ -1755,8 +1865,13 @@ function tick(){
     // once zoomed in to scale=4 (already looked right there). `Math.min(1, view.scale/4)` leaves scale>=4
     // completely unchanged and tapers the thickness down further the closer scale gets to 1, so trains stay
     // clear of their neighbors at every zoom level, not just the higher ones.
-    const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4);
-    const lineLen = trainW*2.5;
+    // The Oakland Airport Connector (beige) is a small 2-car cable shuttle, not a full BART train -- drawing
+    // it at the same thickness/length as a real train (e.g. Red/Yellow) overstates it, since it's really
+    // just going straight back and forth between two stations. Scale it down visually (thinner + shorter)
+    // so it reads as a shuttle, not a full train.
+    const isShuttle = m.lineId==="beige";
+    const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
+    const lineLen = trainW * (isShuttle ? 1.6 : 2.5);
     const dir = Lcur>=Lprev ? 1 : -1;
     const headLen = Lprev + frac*(Lcur-Lprev);
     const tailLen = headLen - dir*lineLen;
