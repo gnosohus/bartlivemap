@@ -1,0 +1,1579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>BART Live</title>
+<style>
+  :root{
+    --bg:#ffffff;
+    --ink:#20201c;
+    --muted:#8d8a80;
+    --card:#ffffff;
+    --shadow: 0 1px 2px rgba(20,20,20,.06), 0 6px 20px rgba(20,20,20,.10);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;height:100dvh;height:calc(var(--vh, 1vh) * 100);background:var(--bg);overflow:hidden;-webkit-tap-highlight-color:transparent;}
+  body{color:var(--ink);}
+  #app{position:fixed;inset:0;}
+  #mapWrap{position:absolute;inset:0;touch-action:none;cursor:grab;}
+  #mapWrap.dragging{cursor:grabbing;}
+  svg#map{width:100%;height:100%;display:block;background:var(--bg);}
+
+  .line-path{fill:none;stroke-linecap:round;stroke-linejoin:round;transition:opacity .25s ease;}
+  .line-path.dimmed{opacity:.10;}
+  .station-dot.dimmed{opacity:.15;}
+  .station-label.dimmed{opacity:.15;}
+
+
+  .station-dot, .station-dot-inner{ display:none; }
+  .lod-city .station-dot, .lod-detail .station-dot, .lod-city .station-dot-inner, .lod-detail .station-dot-inner{ display:block; }
+  .regular-dot{ fill:#fff; stroke:#1a1a1a; }
+  .station-hit{fill:transparent; cursor:pointer; pointer-events:none;}
+  .lod-city .station-hit, .lod-detail .station-hit{ pointer-events:auto; }
+
+  .station-label{
+    font-weight:600; fill:var(--ink); opacity:.85;
+    paint-order:stroke fill; stroke:#fff; stroke-width:3px; stroke-linejoin:round;
+    pointer-events:auto; cursor:pointer; user-select:none; display:none;
+  }
+  .station-label.terminus{ display:block; font-weight:700; opacity:1; }
+  .station-label.terminus.dimmed{ opacity:.15; }
+  .lod-city .station-label, .lod-detail .station-label{ display:block; }
+  .station-dot.focused{ stroke:#20201c; stroke-opacity:.85; }
+  /* stroke-width for .station-dot / .station-dot.focused is set in JS (applyView/updateFocusDots/closePopup),
+     scaled by `inv`, so the ring stays visually thin & constant at every zoom level instead of a flat value
+     that balloons when zoomed in (bug found 2026-09-26, fixed here — see also v37_selectA.html). */
+  .station-dot-inner{ fill:#20201c; opacity:0; pointer-events:none; }
+  .station-dot-inner.focused{ opacity:.85; }
+
+  .train{ pointer-events:none; stroke-linecap:round; stroke-linejoin:round; }
+
+  .card{ background:var(--card); border-radius:16px; box-shadow:var(--shadow); }
+
+  #searchIconBtn{
+    position:absolute; top:14px; left:14px; z-index:6; width:40px; height:40px; border-radius:50%;
+    border:none; background:var(--card); color:var(--ink); box-shadow:var(--shadow); cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  #searchIconBtn.hidden{ display:none; }
+
+  /* Alerts panel — mirrors the search icon/panel pattern, anchored right */
+  #alertsIconBtn{
+    position:absolute; top:14px; right:14px; z-index:6; width:40px; height:40px; border-radius:50%;
+    border:none; background:var(--card); color:var(--ink); box-shadow:var(--shadow); cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  #alertsIconBtn.hidden{ display:none; }
+  #alertsPanel{
+    position:absolute; top:14px; right:14px; z-index:7; width:min(420px, calc(100vw - 28px)); display:none;
+    background:var(--card); border-radius:16px; box-shadow:var(--shadow); padding:14px 16px;
+    max-height:70vh; overflow:auto;
+  }
+  #alertsPanel.open{ display:block; }
+  #alertsPanel .pclose{position:absolute; top:10px; right:12px; cursor:pointer; color:var(--muted); font-size:16px; background:none; border:none;}
+  #alertsPanel h3{ margin:0 0 10px; font-size:14px; }
+  #alertsPanel .item{ display:flex; gap:8px; padding:8px 0; border-top:1px solid #f2f0e8; font-size:12.5px; line-height:1.4; }
+  #alertsPanel .item:first-of-type{ border-top:none; }
+  #alertsPanel .item .ic{ flex:0 0 auto; }
+  #alertsPanel .empty{ color:var(--muted); font-size:12.5px; }
+  #popup .alert-row{ display:flex; gap:8px; align-items:flex-start; background:#fdeaea; color:var(--ink);
+    border-radius:10px; padding:8px 10px; font-size:12px; line-height:1.4; margin-bottom:10px; }
+  #searchWrap{ position:absolute; top:14px; left:14px; z-index:7; width:min(420px, calc(100vw - 28px)); display:none; }
+  #searchWrap.open{ display:block; }
+  #searchWrap input{ width:100%; border:none; outline:none; border-radius:14px; padding:11px 14px; font-size:16px; box-shadow:var(--shadow); background:var(--card); color:var(--ink); font-family:inherit; }
+  #searchResults{ margin-top:6px; background:var(--card); border-radius:14px; box-shadow:var(--shadow); max-height:46vh; overflow:auto; display:none; }
+  #searchResults.open{display:block;}
+  #searchResults .item{ padding:10px 14px; font-size:13.5px; cursor:pointer; display:flex; align-items:center; gap:8px; border-bottom:1px solid #f0ede4; }
+  #searchResults .item:last-child{border-bottom:none;}
+  #searchResults .item:hover{background:#f7f5ee;}
+  #searchResults .chip{width:7px;height:7px;border-radius:50%;flex:0 0 auto;}
+
+  #zoomCtl{ position:absolute; left:14px; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:5; display:flex; flex-direction:column; overflow:hidden; border-radius:14px; box-shadow:var(--shadow); background:var(--card); }
+  #zoomCtl button{ width:42px;height:42px;border:none;background:transparent;font-size:19px;color:var(--ink); cursor:pointer; }
+  #zoomCtl button:first-child{border-bottom:1px solid #f0ede4;}
+  #zoomCtl button:active{background:#f3f1e9;}
+
+  #popup{
+    position:absolute; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%) translateY(12px);
+    z-index:8; width:min(300px,88vw); padding:14px 16px; opacity:0; pointer-events:none;
+    transition:opacity .18s ease, transform .18s ease;
+  }
+  #popup.open{opacity:1; transform:translateX(-50%) translateY(0); pointer-events:auto;}
+  #popup .pname{font-size:14.5px;font-weight:700;margin:0 0 2px;}
+  #popup .pclose{position:absolute; top:10px; right:12px; cursor:pointer; color:var(--muted); font-size:16px; background:none; border:none;}
+  #popup .prow{display:flex; align-items:center; gap:8px; font-size:12.5px; padding:5px 0; border-top:1px solid #f2f0e8;}
+  #popup .prow:first-of-type{border-top:none; margin-top:8px;}
+  #popup .prow .sw{width:8px;height:8px;border-radius:50%;flex:0 0 auto;}
+  #popup .prow .dest{flex:1;}
+  #popup .prow .min{color:var(--muted); font-variant-numeric:tabular-nums;}
+  #popup .empty{font-size:12.5px;color:var(--muted);padding:8px 0 2px;}
+  #popup .pheading{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:10px 0 2px;}
+  #popup .pheading:first-of-type{padding-top:6px;}
+
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="mapWrap">
+    <svg id="map" viewBox="-60 -80 1240 1340" preserveAspectRatio="xMidYMid meet">
+      <g id="lines"></g>
+      <g id="trains"></g>
+      <g id="stations"></g>
+      <g id="stationLabels"></g>
+      <g id="hitTargets"></g>
+    </svg>
+  </div>
+
+
+
+  <button id="searchIconBtn" title="Search stations" aria-label="Search stations">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.2" y2="16.2"></line></svg>
+  </button>
+  <div id="searchWrap">
+    <input id="searchInput" type="text" placeholder="Search stations" autocomplete="off">
+    <div id="searchResults"></div>
+  </div>
+
+  <button id="alertsIconBtn" title="Alerts" aria-label="Alerts">
+    <!-- BELL (previous, for easy revert): width/height 19, stroke-width 2.18, path="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" + path="M13.73 21a2 2 0 0 1-3.46 0" -->
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.97" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.5 2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.5a1.6 1.6 0 0 0-2.8 0Z"></path><line x1="12" y1="9.5" x2="12" y2="13.2"></line><circle cx="12" cy="16" r="0.15" fill="currentColor"></circle></svg>
+  </button>
+  <div id="alertsPanel"><button class="pclose" id="alertsPanelClose">×</button><h3>Alerts</h3><div id="alertsList"></div></div>
+
+
+  <div id="zoomCtl">
+    <button id="zoomIn">+</button>
+    <button id="zoomOut">–</button>
+  </div>
+
+  <div id="popup" class="card">
+    <button class="pclose" id="popupClose">×</button>
+    <div class="pname" id="popupName"></div>
+    <div id="popupBody"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ===================== MOBILE VIEWPORT HEIGHT FIX =====================
+   Mobile browsers resize the visible viewport as the address bar shows/
+   hides; `100dvh` alone doesn't cover every browser version, so this sets
+   an explicit --vh custom property from the real window.innerHeight and
+   keeps it updated. */
+function setRealVH(){
+  document.documentElement.style.setProperty("--vh", (window.innerHeight*0.01)+"px");
+}
+setRealVH();
+window.addEventListener("resize", setRealVH);
+window.addEventListener("orientationchange", setRealVH);
+
+/* ============================= DATA ============================= */
+
+const LINES = {
+  orange: { name:"Richmond – Berryessa", color:"#FF8D28",
+    stations:["RICH","DELN","PLZA","NBRK","DBRK","ASHB","MCAR","19TH","12TH","LAKE","FTVL","COLS","SANL","BAYF","HAYW","SHAY","UCTY","FRMT","WARM","MLPT","BERY"],
+    path:["RICH","DELN","PLZA","NBRK","DBRK","ASHB","Z14","MCAR","19TH","12TH","Z20","LAKE","FTVL","COLS","SANL","BAYF","HAYW","SHAY","AS39","UCTY","FRMT","WARM","MLPT","BERY"] },
+  red: { name:"Richmond – Millbrae", color:"#FF383C",
+    stations:["RICH","DELN","PLZA","NBRK","DBRK","ASHB","MCAR","19TH","12TH","WOAK","EMBR","MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY","COLM","SSAN","SBRN","SFIA","MLBR"],
+    path:["RICH","DELN","PLZA","NBRK","DBRK","ASHB","Z14","MCAR","19TH","12TH","Z20","WOAK","L20","EMBR","MONT","POWL","CIVC","G25","16TH","24TH","GLEN","BALB","G30","DALY","COLM","SSAN","SBRN","SFIA","MLBR"] },
+  yellow: { name:"Antioch – Millbrae / SFO", color:"#FFCC00",
+    stations:["ANTC","PCTR","PITT","NCON","CONC","PHIL","WCRK","LAFY","ORIN","ROCK","MCAR","19TH","12TH","WOAK","EMBR","MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY","COLM","SSAN","SBRN","SFIA","MLBR"],
+    path:["ANTC","PCTR","PITT","NCON","AM1","CONC","PHIL","WCRK","LAFY","ORIN","ROCK","Z14","MCAR","19TH","12TH","Z20","WOAK","L20","EMBR","MONT","POWL","CIVC","G25","16TH","24TH","GLEN","BALB","G30","DALY","COLM","SSAN","SBRN","SFIA","MLBR"] },
+  green: { name:"Berryessa – Daly City", color:"#34C759",
+    stations:["BERY","MLPT","WARM","FRMT","UCTY","SHAY","HAYW","BAYF","SANL","COLS","FTVL","LAKE","WOAK","EMBR","MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY"],
+    path:["BERY","MLPT","WARM","FRMT","UCTY","AS39","SHAY","HAYW","BAYF","SANL","COLS","FTVL","LAKE","Z20","WOAK","L20","EMBR","MONT","POWL","CIVC","G25","16TH","24TH","GLEN","BALB","G30","DALY"] },
+  blue: { name:"Dublin/Pleasanton – Daly City", color:"#0088FF",
+    stations:["DUBL","WDUB","CAST","BAYF","SANL","COLS","FTVL","LAKE","WOAK","EMBR","MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY"],
+    path:["DUBL","WDUB","CAST","AK31","BAYF","SANL","COLS","FTVL","LAKE","Z20","WOAK","L20","EMBR","MONT","POWL","CIVC","G25","16TH","24TH","GLEN","BALB","G30","DALY"] },
+  beige: { name:"Oakland Airport Connector", color:"#8E8E93",
+    stations:["COLS","OAKL"],
+    path:["COLS","OAKL"] }
+};
+
+const STATIONS_RAW = [
+["RICH","Richmond",37.9366,-122.3535],["DELN","El Cerrito del Norte",37.9257,-122.3172],
+["PLZA","El Cerrito Plaza",37.9026,-122.2989],["NBRK","North Berkeley",37.8740,-122.2836],
+["DBRK","Downtown Berkeley",37.8697,-122.2679],["ASHB","Ashby",37.8528,-122.2698],
+["MCAR","MacArthur",37.8288,-122.2680],["19TH","19th St Oakland",37.8162,-122.2680],
+["12TH","12th St Oakland",37.8036,-122.2680],["WOAK","West Oakland",37.8020,-122.2952],
+["LAKE","Lake Merritt",37.7950,-122.2600],["FTVL","Fruitvale",37.7746,-122.2241],
+["COLS","Coliseum",37.7540,-122.1966],["SANL","San Leandro",37.7219,-122.1611],
+["BAYF","Bay Fair",37.6970,-122.1265],["HAYW","Hayward",37.6698,-122.0871],
+["SHAY","South Hayward",37.6349,-122.0574],["UCTY","Union City",37.5911,-122.0177],
+["FRMT","Fremont",37.5573,-121.9764],["WARM","Warm Springs",37.5024,-121.9391],
+["MLPT","Milpitas",37.4106,-121.8916],["BERY","Berryessa/North San Jose",37.3684,-121.8747],
+["CAST","Castro Valley",37.6907,-122.0757],["WDUB","West Dublin",37.6996,-121.9282],
+["DUBL","Dublin/Pleasanton",37.7018,-121.9001],["ROCK","Rockridge",37.8449,-122.2513],
+["ORIN","Orinda",37.8781,-122.1836],["LAFY","Lafayette",37.8933,-122.1245],
+["WCRK","Walnut Creek",37.9059,-122.0672],["PHIL","Pleasant Hill",37.9284,-122.0563],
+["CONC","Concord",37.9739,-122.0294],["NCON","North Concord",38.0031,-122.0246],
+["PITT","Pittsburg/Bay Point",38.0189,-121.9450],["PCTR","Pittsburg Center",38.0186,-121.8853],
+["ANTC","Antioch",37.9955,-121.7807],["EMBR","Embarcadero",37.7929,-122.3969],
+["MONT","Montgomery St",37.7894,-122.4019],["POWL","Powell St",37.7844,-122.4076],
+["CIVC","Civic Center",37.7795,-122.4137],["16TH","16th St Mission",37.7649,-122.4200],
+["24TH","24th St Mission",37.7524,-122.4184],["GLEN","Glen Park",37.7331,-122.4339],
+["BALB","Balboa Park",37.7217,-122.4475],["DALY","Daly City",37.7061,-122.4692],
+["COLM","Colma",37.6844,-122.4661],["SSAN","South San Francisco",37.6642,-122.4440],
+["SBRN","San Bruno",37.6377,-122.4165],["SFIA","SFO Airport",37.6159,-122.3925],
+["MLBR","Millbrae",37.6003,-122.3867],["OAKL","Oakland Airport",37.7134,-122.2120]
+];
+
+const STATIONS = {};
+STATIONS_RAW.forEach(function(s){ STATIONS[s[0]] = { id:s[0], name:s[1], lat:s[2], lon:s[3], lines:[] }; });
+const LINE_ORDER = ["yellow","orange","red","green","blue","beige"];
+LINE_ORDER.forEach(function(lid){
+  const seq = LINES[lid].stations;
+  seq.forEach(function(sid){ STATIONS[sid].lines.push(lid); });
+  // the OAK connector's start (Coliseum) is already a real hub on other lines, not a true system terminus —
+  // and its end (Oakland Airport) is a short shuttle stop, not a real terminus either — so beige gets no
+  // terminus styling on either end, unlike every other line
+  if(lid!=="beige") STATIONS[seq[0]].terminus = true;
+  if(lid!=="beige") STATIONS[seq[seq.length-1]].terminus = true;
+});
+
+/* ============================= PROJECTION (self-contained, no map tiles) ============================= */
+
+const lats = STATIONS_RAW.map(function(s){return s[2];});
+const lons = STATIONS_RAW.map(function(s){return s[3];});
+const latMax = Math.max.apply(null, lats), latMin = Math.min.apply(null, lats);
+const lonMin = Math.min.apply(null, lons);
+const cosLat = Math.cos(((latMin+latMax)/2) * Math.PI/180);
+const PAD = 70, VBW = 1300, VBH = 1340;
+
+function rawXY(lat, lon){ return { x:(lon-lonMin)*cosLat, y:(latMax-lat) }; }
+let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+STATIONS_RAW.forEach(function(s){ const p=rawXY(s[2],s[3]); if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y; });
+const spanX=maxX-minX, spanY=maxY-minY;
+const PSCALE = Math.min((VBW-2*PAD)/spanX, (VBH-2*PAD)/spanY);
+const offX = PAD - minX*PSCALE + ((VBW-2*PAD)-spanX*PSCALE)/2;
+const offY = PAD - minY*PSCALE + ((VBH-2*PAD)-spanY*PSCALE)/2;
+function toXY(lat,lon){ const p=rawXY(lat,lon); return { x:p.x*PSCALE+offX, y:p.y*PSCALE+offY }; }
+STATIONS_RAW.forEach(function(s){ const p=toXY(s[2],s[3]); STATIONS[s[0]].x=p.x; STATIONS[s[0]].y=p.y; });
+// --- schematic grid override: PDF v2 grid (column letter = x, row number = y, ×20 units) — see
+// Notion "Station Coordinates (PDF Grid)". Replaces the old lat/lon-derived approximation entirely;
+// every station below is exactly collinear with its neighbors along real corridors. ---
+const SCHEMATIC = {
+  "12TH":{x:520,y:360}, // was y:380 (row 19) — nudged to row 18 2026-09-19, see note below SCHEMATIC
+  "16TH":{x:140,y:520},
+  "19TH":{x:520,y:330}, // was y:340 (row 17) — nudged to row 16.5 2026-09-19, see note below SCHEMATIC
+  "24TH":{x:140,y:540},
+  "ANTC":{x:1080,y:20},
+  "ASHB":{x:480,y:240},
+  "BALB":{x:140,y:580},
+  "BAYF":{x:720,y:600},
+  "BERY":{x:900,y:1160},
+  "CAST":{x:840,y:620},
+  "CIVC":{x:160,y:480},
+  "COLM":{x:200,y:660},
+  "COLS":{x:640,y:520},
+  "CONC":{x:760,y:40},
+  "DALY":{x:160,y:620},
+  "DBRK":{x:440,y:200},
+  "DELN":{x:320,y:80},
+  "DUBL":{x:1000,y:620},
+  "EMBR":{x:220,y:420},
+  "FRMT":{x:900,y:920},
+  "FTVL":{x:600,y:480},
+  "GLEN":{x:140,y:560},
+  "HAYW":{x:820,y:700},
+  "LAFY":{x:640,y:160},
+  "LAKE":{x:560,y:440},
+  "MCAR":{x:520,y:300},
+  "MLBR":{x:360,y:820},
+  "MLPT":{x:900,y:1080},
+  "MONT":{x:200,y:440},
+  "NBRK":{x:400,y:160},
+  "NCON":{x:840,y:20},
+  "OAKL":{x:600,y:560},
+  "ORIN":{x:600,y:200},
+  "PCTR":{x:1000,y:20},
+  "PHIL":{x:720,y:80},
+  "PITT":{x:920,y:20},
+  "PLZA":{x:360,y:120},
+  "POWL":{x:180,y:460},
+  "RICH":{x:280,y:40},
+  "ROCK":{x:560,y:240},
+  "SANL":{x:680,y:560},
+  "SBRN":{x:280,y:740},
+  "SFIA":{x:320,y:780},
+  "SHAY":{x:880,y:760},
+  "SSAN":{x:240,y:700},
+  "UCTY":{x:900,y:840},
+  "WARM":{x:900,y:1000},
+  "WCRK":{x:680,y:120},
+  "WDUB":{x:920,y:620},
+  "WOAK":{x:440,y:400},
+};
+Object.keys(SCHEMATIC).forEach(function(sid){ if(STATIONS[sid]){ STATIONS[sid].x=SCHEMATIC[sid].x; STATIONS[sid].y=SCHEMATIC[sid].y; } });
+// NOTE 2026-09-19: 19TH/12TH are the only two stations NOT on an integer PDF grid row (16.5, 18 instead of
+// 17, 19) — a deliberate spacing nudge, not a PDF cell. Old (row 17/19) had MacArthur-19th-12th at even
+// 40-unit steps but left 12th only 20 units from the Z20 fork (half the other gaps, visually cramped).
+// New: even 30-unit steps MacArthur-19th-12th, and 12th now sits a full 40 units from Z20, same as the
+// other gaps. Still exactly vertical (x unchanged) so the 45°/90°-only rule is untouched.
+
+// non-station bend waypoints — the 9 cells where a line actually changes direction (see Notion
+// "Route Geometry"). These have no dot/label of their own; they only exist to give LINES[lid].path a
+// true corner to round at, instead of the old bug where every real station became a rounding corner.
+const WAYPOINTS = {
+  "Z14":{x:520,y:280},
+  "AM1":{x:780,y:20},
+  "Z20":{x:520,y:400},
+  "L20":{x:240,y:400}, // was G20 — shifted +5 cols (2026-09-19)
+  "G25":{x:140,y:500}, // was B25
+  "G30":{x:140,y:600}, // was B30
+  "AK31":{x:740,y:620},
+  "AS39":{x:900,y:780},
+};
+// resolves either a station id or a bend-waypoint id to {x,y}
+function pt(id){ const s=STATIONS[id]; if(s) return s; const w=WAYPOINTS[id]; if(w) return w; throw new Error("unknown waypoint: "+id); }
+
+
+function haversineKm(a,b){
+  const R=6371, toRad=Math.PI/180;
+  const dLat=(b.lat-a.lat)*toRad, dLon=(b.lon-a.lon)*toRad;
+  const la1=a.lat*toRad, la2=b.lat*toRad;
+  const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+/* ============================= LINE GEOMETRY — fixed lane order per line (not recomputed per edge, so a
+   line never swaps sides/crosses another line as the set of overlapping lines changes), straight between
+   stations, with a smooth rounded corner at each bend — matching official BART map style ============================= */
+
+const LINE_WEIGHT = 4.4;
+// EXPERIMENT (2026-09-26): widened from the original 8 to give parallel lines a bit more breathing room,
+// now that trains are thin gradient capsules rather than circles. Reviewed against labels/collisions —
+// label placement is fully formula-driven off the real dot positions (see dotPositionForStation/edgeOffset
+// below), so it re-adjusts automatically and no label positions needed hand-tuning for this change.
+// TO REVERT: just change 10 back to 8 — nothing else references the old value, this is the single source.
+const OFFSET_PX = 10;
+// Inner station-dot fill radius, as a fraction of the outer dot radius (see applyView) — tuned for a normal
+// "radio button" look (small filled center + visible white gap + thin ring) at every zoom level.
+const DOT_INNER_RATIO = 0.45;
+// Station-dot outer radius at max zoom (scale=8) — read by styleForScale() above AND by the label-placement
+// clearance math (search dotR_max below) so labels keep the right amount of headroom around the now-bigger
+// dot. TO REVERT to the old (smaller) max-zoom dot size, set this back to 11.5.
+const DOTR_MAX = 19.5;
+// Station tap-target radius, in "at scale=1" SVG units, always multiplied by inv (like line-hit) so the tap
+// target stays a GENEROUS, CONSTANT on-screen size at every zoom level — unlike the old flat r:7 (no *inv),
+// which rendered small on-screen right at the lod-city zoom threshold (where stations first become
+// clickable) and only grew large well after, making early-zoom station taps unreliable (2026-09-26 fix).
+const STATION_HIT_R = 18;
+const CORNER_RADIUS = 13;
+// fixed global lane rank per line — left-to-right through the Daly City / SF trunk is red, yellow, blue,
+// green (as in the reference map); orange and the OAK shuttle don't run through that trunk so they're
+// placed clear of it. Because this rank never changes per-edge, a line always stays on the same side.
+const LANE = { red:1.5, yellow:0.5, blue:-0.5, green:-1.5, orange:2.5, beige:-2.5 };
+// per-corridor override: orange runs down the MIDDLE of whichever two lines it's actually running
+// alongside in that stretch — between red/yellow on the Richmond trunk, between blue/green on the
+// Fremont trunk — which a single global LANE value can never do for both at once (proven: red<yellow and
+// blue<green in strictly that order for the West Oakland requirement means the (red,yellow) and
+// (blue,green) intervals can never overlap, so no single orange value sits inside both). Listed by edge.
+const CORRIDOR_LANE = {};
+function addCorridor(edges, laneMap){ edges.forEach(function(e){ CORRIDOR_LANE[e[0]+"|"+e[1]] = laneMap; CORRIDOR_LANE[e[1]+"|"+e[0]] = laneMap; }); }
+addCorridor([["RICH","DELN"],["DELN","PLZA"],["PLZA","NBRK"],["NBRK","DBRK"],["DBRK","ASHB"],["ASHB","Z14"],["Z14","MCAR"],["MCAR","19TH"],["19TH","12TH"],["12TH","Z20"]],
+  { red:1, orange:0, yellow:-1 });
+// South trunk (Lake Merritt→Berryessa): verified against the official BART map — Blue sits on the Lake
+// Merritt/inner side, Green on the outer side (blue:-1, green:+1), the OPPOSITE of what was here before.
+addCorridor([["Z20","LAKE"],["LAKE","FTVL"],["FTVL","COLS"],["COLS","SANL"],["SANL","BAYF"],
+  ["BAYF","HAYW"],["HAYW","SHAY"],["SHAY","AS39"],["AS39","UCTY"],["UCTY","FRMT"],["FRMT","WARM"],["WARM","MLPT"],["MLPT","BERY"]],
+  { blue:-1, orange:0, green:1 });
+// blue's Dublin spur joins this same south trunk at Bay Fair — give it the trunk's own lane (-1) all the
+// way back to Dublin (not just from West Dublin — DUBL-WDUB was missing here, which is what let the lane
+// value jump right at West Dublin) so it arrives already aligned instead of snapping into place at BAYF
+addCorridor([["DUBL","WDUB"],["WDUB","CAST"],["CAST","AK31"],["AK31","BAYF"]], { blue:-1 });
+// West Oakland → Civic Center: this stretch runs "backward" (decreasing x/y) relative to the canonical
+// low→high direction edgeOffset sorts by, so the plain LANE defaults below rendered it mirrored — Green
+// where Red should be and vice versa. Verified per-edge against the official map: Red innermost, Green
+// outermost, all the way from West Oakland to Civic Center. (Civic Center→Daly City→Millbrae runs the
+// other way and already matches the official map on the plain defaults — left untouched.)
+addCorridor([["Z20","WOAK"],["WOAK","L20"],["L20","EMBR"],["EMBR","MONT"],["MONT","POWL"],["POWL","CIVC"],["CIVC","G25"]],
+  { red:-1.5, yellow:-0.5, blue:0.5, green:1.5 });
+// Oakland Airport branch splits off the trunk AT Coliseum's own dot — no lane offset for it (it's a lone
+// dashed line, not sharing a corridor with anything else), otherwise it starts ~14 units off from where
+// the orange/green/blue dots actually sit at COLS
+addCorridor([["COLS","OAKL"]], { beige:0 });
+
+// canonicalize direction by real coordinates (not by which node the caller happened to list first) so the
+// SAME physical edge always yields the SAME normal, even when two lines walk it in opposite order — e.g.
+// orange goes Z20→LAKE while green/blue go LAKE→Z20; without this, that edge's "offset side" flipped
+// between them and threw their lanes to the wrong side right at the station (recurring bug #1).
+function edgeOffset(lowId,hiId,lid){
+  let A=pt(lowId), B=pt(hiId);
+  if(A.x>B.x || (A.x===B.x && A.y>B.y)){ const t=A; A=B; B=t; }
+  const dx=B.x-A.x, dy=B.y-A.y, len=Math.hypot(dx,dy)||1;
+  const nx=-dy/len, ny=dx/len;
+  const override = CORRIDOR_LANE[lowId+"|"+hiId];
+  const lane = (override && override[lid]!=null) ? override[lid] : LANE[lid];
+  return { dx: nx*lane*OFFSET_PX, dy: ny*lane*OFFSET_PX };
+}
+function lineIntersect(p1,d1,p2,d2){
+  const denom = d1.x*d2.y - d1.y*d2.x;
+  if(Math.abs(denom) < 1e-6) return null;
+  const t = ((p2.x-p1.x)*d2.y - (p2.y-p1.y)*d2.x) / denom;
+  return { x: p1.x+d1.x*t, y: p1.y+d1.y*t };
+}
+// one joint point per WAYPOINT (station or bend) along each line's rendered path — end waypoints use
+// their one edge's fixed-lane offset; interior waypoints use the intersection of the incoming/outgoing
+// offset lines (a miter join), so consecutive edges always meet exactly with no gap, before rounding.
+// Built from LINES[lid].path (stations + the 9 bend cells), NOT the stop list, so the drawn line actually
+// bends only at those 9 cells instead of at every station.
+function buildJoints(seqOf){
+  const joints = {};
+  LINE_ORDER.forEach(function(lid){
+    const seq = seqOf(lid);
+    const pts = [];
+    for(let i=0;i<seq.length;i++){
+      const cur = pt(seq[i]);
+      if(i===0){
+        const off = edgeOffset(seq[0], seq[1], lid);
+        pts.push({ x:cur.x+off.dx, y:cur.y+off.dy });
+      } else if(i===seq.length-1){
+        const off = edgeOffset(seq[i-1], seq[i], lid);
+        pts.push({ x:cur.x+off.dx, y:cur.y+off.dy });
+      } else {
+        const prev = pt(seq[i-1]), next = pt(seq[i+1]);
+        const offIn = edgeOffset(seq[i-1], seq[i], lid);
+        const offOut = edgeOffset(seq[i], seq[i+1], lid);
+        const p1 = { x:cur.x+offIn.dx, y:cur.y+offIn.dy }, d1 = { x:cur.x-prev.x, y:cur.y-prev.y };
+        const p2 = { x:cur.x+offOut.dx, y:cur.y+offOut.dy }, d2 = { x:next.x-cur.x, y:next.y-cur.y };
+        pts.push(lineIntersect(p1,d1,p2,d2) || p1);
+      }
+    }
+    joints[lid] = pts;
+  });
+  return joints;
+}
+const lineJoints = buildJoints(function(lid){ return LINES[lid].path; }); // for the drawn line + dots
+// (train animation now samples the real rendered <path> via pathLenAt, built further below once the paths
+// exist in the DOM — no separate station-only joints structure needed any more)
+// build one continuous path per line: straight "L" between stations, but each interior joint is rounded
+// by cutting back a small distance on both adjacent edges and connecting with a quadratic bezier (using
+// the sharp corner as the control point) — a standard, clean corner-rounding technique.
+// shared by both the visual line (roundedPath) and the station dots (dotPositionForStation) so a dot
+// always sits exactly on the curve the line actually draws, even right at a rounded bend
+function roundedCorner(prev, cur, next, rOverride){
+  const dIn = Math.hypot(cur.x-prev.x, cur.y-prev.y)||1;
+  const dOut = Math.hypot(next.x-cur.x, next.y-cur.y)||1;
+  const r = rOverride!=null ? Math.min(rOverride, dIn*0.45, dOut*0.45) : Math.min(CORNER_RADIUS, dIn*0.45, dOut*0.45);
+  const inX = cur.x-(cur.x-prev.x)/dIn*r, inY = cur.y-(cur.y-prev.y)/dIn*r;
+  const outX = cur.x+(next.x-cur.x)/dOut*r, outY = cur.y+(next.y-cur.y)/dOut*r;
+  // point ON the quadratic bezier at t=0.5 (control point = cur) — the curve does NOT pass through cur
+  // itself once rounded, so this is the correct "on the line" position near this station
+  const midX = 0.25*inX+0.5*cur.x+0.25*outX, midY = 0.25*inY+0.5*cur.y+0.25*outY;
+  return { in:{x:inX,y:inY}, out:{x:outX,y:outY}, mid:{x:midX,y:midY} };
+}
+// shared corner radius per STATION (not per line/lane) — computed once from the true, un-offset station
+// positions, so every line bending together at the same station gets the exact same rounding, instead of
+// each lane's own slightly-different offset geometry picking its own radius
+function sharedCornerRadius(sid){
+  const st = pt(sid);
+  const lines = STATIONS[sid] ? STATIONS[sid].lines : LINE_ORDER.filter(function(l){ return LINES[l].path.indexOf(sid)!==-1; });
+  if(lines.length<1) return CORNER_RADIUS;
+  const lid = lines[0], seq = LINES[lid].path, idx = seq.indexOf(sid);
+  if(idx<=0 || idx>=seq.length-1) return CORNER_RADIUS;
+  const dIn = Math.hypot(st.x-pt(seq[idx-1]).x, st.y-pt(seq[idx-1]).y)||1;
+  const dOut = Math.hypot(pt(seq[idx+1]).x-st.x, pt(seq[idx+1]).y-st.y)||1;
+  return Math.min(CORNER_RADIUS, dIn*0.45, dOut*0.45);
+}
+function roundedPath(pts, seq){
+  if(pts.length<2) return "";
+  if(pts.length===2) return "M "+pts[0].x.toFixed(1)+" "+pts[0].y.toFixed(1)+" L "+pts[1].x.toFixed(1)+" "+pts[1].y.toFixed(1);
+  let d = "M "+pts[0].x.toFixed(1)+" "+pts[0].y.toFixed(1);
+  for(let i=1;i<pts.length-1;i++){
+    const r = seq ? sharedCornerRadius(seq[i]) : undefined;
+    const c = roundedCorner(pts[i-1], pts[i], pts[i+1], r);
+    d += " L "+c.in.x.toFixed(1)+" "+c.in.y.toFixed(1);
+    d += " Q "+pts[i].x.toFixed(1)+" "+pts[i].y.toFixed(1)+" "+c.out.x.toFixed(1)+" "+c.out.y.toFixed(1);
+  }
+  d += " L "+pts[pts.length-1].x.toFixed(1)+" "+pts[pts.length-1].y.toFixed(1);
+  return d;
+}
+// the exact position on line lid's rendered curve for the station at this index — endpoints have no
+// rounding (use the joint directly); interior stations use the bezier midpoint from roundedCorner above.
+// But if every line through this station shares the same previous (or same next) station — i.e. they
+// only diverge on ONE side of it — use that SHARED edge's simple offset for all of them instead, so their
+// dots line up as one clean row even though the lines themselves fan out after/before this point.
+function dotPositionForStation(lid, sid){
+  const pts = lineJoints[lid];
+  const st = STATIONS[sid];
+  const seq = LINES[lid].path;
+  const idx = seq.indexOf(sid);
+  if(st.lines.length>1){
+    // "prevs"/"nexts" here are STOP-adjacency (LINES[l].stations), not path-adjacency — this is
+    // deliberately about which real station riders transfer to/from, independent of any bend in between.
+    const prevs = st.lines.map(function(l){ const i=LINES[l].stations.indexOf(sid); return i>0?LINES[l].stations[i-1]:null; });
+    const nexts = st.lines.map(function(l){ const i=LINES[l].stations.indexOf(sid); return i<LINES[l].stations.length-1?LINES[l].stations[i+1]:null; });
+    const sharedPrev = prevs.every(function(p){return p===prevs[0] && p!==null;});
+    const sharedNext = nexts.every(function(n){return n===nexts[0] && n!==null;});
+    if(sharedPrev && sharedNext){
+      // fully identical topology for every line here (e.g. Embarcadero, Daly City) — a per-line bezier
+      // offset can skew apart at a sharp bend, so instead compute ONE shared bisector normal from the
+      // station's true (un-offset) position and offset each line's dot along that same line, straight —
+      // guarantees a clean row regardless of how sharp the turn is.
+      // Use the TRUE geometric neighbor (this line's own `.path`, which includes bend waypoints) for the
+      // direction math, not the stop-adjacent one — a station one hop from a bend point (e.g. Embarcadero
+      // is one hop from L20) has a STOP neighbor (West Oakland) that skips right over that bend, giving a
+      // skewed, non-perpendicular angle. `prevs[0]`/`nexts[0]` (STOP-adjacent) are kept only as the
+      // CORRIDOR_LANE lookup key's fallback and for the topology check above — the direction itself always
+      // uses the real adjacent path point.
+      const truePrevId = idx>0 ? seq[idx-1] : prevs[0];
+      const trueNextId = idx<seq.length-1 ? seq[idx+1] : nexts[0];
+      const offPrev = edgeOffset(truePrevId, sid, lid);
+      const offNext = edgeOffset(sid, trueNextId, lid);
+      const magPrev = Math.hypot(offPrev.dx, offPrev.dy), magNext = Math.hypot(offNext.dx, offNext.dy);
+      const n1 = magPrev>1e-6 ? {x:offPrev.dx/magPrev, y:offPrev.dy/magPrev} : null;
+      const n2 = magNext>1e-6 ? {x:offNext.dx/magNext, y:offNext.dy/magNext} : null;
+      let bis;
+      if(n1 && n2){ bis = {x:n1.x+n2.x, y:n1.y+n2.y}; const bl=Math.hypot(bis.x,bis.y); bis = bl<1e-6 ? n1 : {x:bis.x/bl,y:bis.y/bl}; }
+      else bis = n1 || n2 || {x:0,y:0};
+      const mag = (magPrev + magNext)/2 || OFFSET_PX;
+      return { x:st.x+bis.x*mag, y:st.y+bis.y*mag };
+    }
+    if(sharedPrev && idx>0){ const off=edgeOffset(seq[idx-1],seq[idx],lid); return {x:st.x+off.dx,y:st.y+off.dy}; }
+    if(sharedNext && idx<seq.length-1){ const off=edgeOffset(seq[idx],seq[idx+1],lid); return {x:st.x+off.dx,y:st.y+off.dy}; }
+  }
+  if(idx<=0 || idx>=pts.length-1) return pts[idx];
+  return roundedCorner(pts[idx-1], pts[idx], pts[idx+1]).mid;
+}
+
+/* ============================= SVG HELPER ============================= */
+
+const svgNS = "http://www.w3.org/2000/svg";
+function el(tag,attrs){ const e=document.createElementNS(svgNS,tag); for(const k in attrs){ e.setAttribute(k,attrs[k]); } return e; }
+
+function lightenHex(hex, amt){
+  const n = parseInt(hex.slice(1),16);
+  let r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  r = Math.round(r+(255-r)*amt); g = Math.round(g+(255-g)*amt); b = Math.round(b+(255-b)*amt);
+  return "#"+[r,g,b].map(function(v){ return v.toString(16).padStart(2,"0"); }).join("");
+}
+
+// one dynamic gradient PER TRAIN (not per line) — gradientUnits="userSpaceOnUse" with x1,y1/x2,y2 updated
+// every tick to that train's own current tail/head coordinates. A single per-line gradient in the default
+// objectBoundingBox units (a fixed horizontal x1=0,x2=1 vector) only fades correctly for a roughly
+// horizontal train; on a vertical or diagonal stretch the bounding box's horizontal extent is just the
+// stroke width, so the fade collapses to a near-uniform dark blob instead of a head→tail gradient. Tying
+// the gradient vector to the train's real tail→head points fixes this at any orientation.
+const trainDefs = el("defs", {});
+document.getElementById("map").insertBefore(trainDefs, document.getElementById("map").firstChild);
+function makeTrainGradient(key, color){
+  const grad = el("linearGradient", { id:"trainGrad-"+key, gradientUnits:"userSpaceOnUse", x1:"0", y1:"0", x2:"1", y2:"0" });
+  grad.appendChild(el("stop", { offset:"0%", "stop-color":color, "stop-opacity":"0.30" }));
+  grad.appendChild(el("stop", { offset:"100%", "stop-color":color, "stop-opacity":"1.0" }));
+  trainDefs.appendChild(grad);
+  return grad;
+}
+
+/* ============================= LINES — one continuous rounded path per line ============================= */
+
+const linesG = document.getElementById("lines");
+const linePathEls = {}; // lid -> single path element
+const lineHitEls = {}; // lid -> invisible wide-stroke path used only for tap/click hit-testing
+const THIN_FACTOR = 0.22; // thin rails, but each line keeps its own color (v37b: circles' thin form + real line colors)
+LINE_ORDER.forEach(function(lid){
+  const d = roundedPath(lineJoints[lid], LINES[lid].path);
+  const path = el("path", {
+    d:d, class:"line-path", stroke:lightenHex(LINES[lid].color, 0.2),
+    "stroke-width": LINE_WEIGHT*THIN_FACTOR
+  });
+  linesG.appendChild(path);
+  linePathEls[lid] = [path];
+
+  // v37b: the visible rail is thin, but the tappable area should stay as forgiving as v36's full line
+  // thickness (easy to hit on mobile without zooming in) — an invisible, wider stroke on top of the same
+  // path handles hit-testing (pointer-events:stroke lets it catch taps even though it paints nothing).
+  const hit = el("path", {
+    d:d, class:"line-hit", stroke:"#000", "stroke-opacity":"0",
+    "stroke-width": LINE_WEIGHT, fill:"none", "pointer-events":"stroke"
+  });
+  hit.addEventListener("click", function(e){ e.stopPropagation(); setSolo(lid); });
+  hit.style.cursor = "pointer";
+  linesG.appendChild(hit);
+  lineHitEls[lid] = hit;
+});
+
+// length-along-path (in SVG user units) of every waypoint (station or bend) on each line's real rendered
+// curve — built once here via getPointAtLength/getTotalLength, so train animation can later sample the
+// TRUE curve (lane offset + rounded corners, exactly as drawn) instead of a straight station-to-station hop.
+// Two-phase per line: (1) sample the whole path at fine, fixed resolution once (cheap — a few thousand
+// native getPointAtLength calls), (2) for each waypoint in path order, scan forward from the previous
+// waypoint's sample for the nearest sample, then refine locally for sub-pixel precision. A pure binary
+// search over the whole remaining range isn't safe here — distance-to-target isn't unimodal on a path this
+// long (it can dip near a WRONG far-away point before rising again), so it can converge to the wrong spot.
+const pathLenAt = {};
+LINE_ORDER.forEach(function(lid){
+  const el0 = linePathEls[lid][0];
+  const total = el0.getTotalLength();
+  const seq = LINES[lid].path;
+  const STEP = Math.max(0.5, total/2000);
+  const samples = [];
+  for(let L=0; L<=total; L+=STEP){ const p = el0.getPointAtLength(L); samples.push({L:L,x:p.x,y:p.y}); }
+  if(samples[samples.length-1].L < total){ const p = el0.getPointAtLength(total); samples.push({L:total,x:p.x,y:p.y}); }
+  const table = {};
+  let searchIdx = 0;
+  seq.forEach(function(wid){
+    const target = pt(wid);
+    let bestIdx = searchIdx, bestD = Infinity;
+    for(let i=searchIdx;i<samples.length;i++){
+      const s = samples[i];
+      const d = (s.x-target.x)*(s.x-target.x) + (s.y-target.y)*(s.y-target.y);
+      if(d<bestD){ bestD=d; bestIdx=i; }
+    }
+    // local refine around the best sample for sub-pixel precision
+    let lo = samples[Math.max(0,bestIdx-1)].L, hi = samples[Math.min(samples.length-1,bestIdx+1)].L;
+    for(let iter=0; iter<20; iter++){
+      const m1 = lo + (hi-lo)/3, m2 = hi - (hi-lo)/3;
+      const p1 = el0.getPointAtLength(m1), p2 = el0.getPointAtLength(m2);
+      const d1 = (p1.x-target.x)*(p1.x-target.x)+(p1.y-target.y)*(p1.y-target.y);
+      const d2 = (p2.x-target.x)*(p2.x-target.x)+(p2.y-target.y)*(p2.y-target.y);
+      if(d1<d2) hi = m2; else lo = m1;
+    }
+    const L = (lo+hi)/2;
+    table[wid] = L;
+    searchIdx = bestIdx;
+  });
+  pathLenAt[lid] = { table:table, total:total };
+});
+
+
+/* ============================= STATIONS + LABELS ============================= */
+
+/* ============================= STATIONS + LABELS — one dot per (station, line) at that line's own lane
+   position, styled like the official map: small solid dot for a regular stop, hollow white/black circle
+   for a transfer station (with a thin tick connecting its aligned dots), larger solid dot for a terminus ============================= */
+
+const stationsG = document.getElementById("stations");
+const stationLabelsG = document.getElementById("stationLabels");
+const hitG = document.getElementById("hitTargets");
+const stationEls = {}; // sid -> array of per-line dot circle elements
+
+// rough center of the whole system, used so labels default to the outward/open side rather than the
+// crowded interior where other lines run
+let cxSum=0, cySum=0, cCount=0;
+Object.keys(STATIONS).forEach(function(sid){ cxSum+=STATIONS[sid].x; cySum+=STATIONS[sid].y; cCount++; });
+const NET_CENTER = { x:cxSum/cCount, y:cySum/cCount };
+
+function localDirection(sid, lid){
+  const seq = LINES[lid].path;
+  const idx = seq.indexOf(sid);
+  const joints = lineJoints[lid];
+  let a, b;
+  if(idx>0 && idx<seq.length-1){ a=joints[idx-1]; b=joints[idx+1]; }
+  else if(idx===0){ a=joints[0]; b=joints[1]; }
+  else { a=joints[idx-1]; b=joints[idx]; }
+  return { x:b.x-a.x, y:b.y-a.y };
+}
+// true local perpendicular at a station — mirrors dotPositionForStation's own bisector logic (including
+// the v31 true-path-neighbor fix) exactly, so the label's offset axis always matches the axis the dots
+// themselves are actually spread along, whatever that is (vertical, horizontal, or a 45° diagonal).
+function stationPerpVec(sid){
+  const st = STATIONS[sid];
+  const isHub = st.lines.length>1;
+  let dir;
+  if(isHub){
+    const prevs = st.lines.map(function(l){ const i=LINES[l].stations.indexOf(sid); return i>0?LINES[l].stations[i-1]:null; });
+    const nexts = st.lines.map(function(l){ const i=LINES[l].stations.indexOf(sid); return i<LINES[l].stations.length-1?LINES[l].stations[i+1]:null; });
+    const sharedPrev = prevs.every(function(p){return p===prevs[0] && p!==null;});
+    const sharedNext = nexts.every(function(n){return n===nexts[0] && n!==null;});
+    const lid0 = st.lines[0], pseq = LINES[lid0].path, pidx = pseq.indexOf(sid);
+    const truePrevId = pidx>0 ? pseq[pidx-1] : null, trueNextId = pidx<pseq.length-1 ? pseq[pidx+1] : null;
+    if(sharedPrev && sharedNext){ const p=pt(truePrevId), n=pt(trueNextId); dir={x:n.x-p.x,y:n.y-p.y}; }
+    else if(sharedPrev){ const p=pt(truePrevId); dir={x:st.x-p.x,y:st.y-p.y}; }
+    else if(sharedNext){ const n=pt(trueNextId); dir={x:n.x-st.x,y:n.y-st.y}; }
+    else dir=localDirection(sid, lid0);
+  } else dir=localDirection(sid, st.lines[0]);
+  const dlen = Math.hypot(dir.x,dir.y)||1;
+  return { x:-dir.y/dlen, y:dir.x/dlen }; // one of the two perpendicular unit vectors — sign picked below
+}
+// stations whose true perpendicular is (near-)vertical, sitting on a horizontal corridor: text anchors
+// directly above the dot (anchor x = dot x, no sideways shift) — default LEFT-aligned (reads rightward
+// from above the dot), except West Oakland which reads better right-aligned.
+const VERTICAL_ALIGN_OVERRIDE = { WOAK:"end" };
+const DEFAULT_VERTICAL_ALIGN = "start";
+
+Object.keys(STATIONS).forEach(function(sid){
+  const st = STATIONS[sid];
+  const isHub = st.lines.length>1;
+  const dots = [];
+  st.lines.forEach(function(lid){
+    const dotPt = dotPositionForStation(lid, sid);
+    const c = el("circle", { cx:dotPt.x.toFixed(1), cy:dotPt.y.toFixed(1), class:"station-dot regular-dot" });
+    stationsG.appendChild(c);
+    const inner = el("circle", { cx:dotPt.x.toFixed(1), cy:dotPt.y.toFixed(1), class:"station-dot-inner" });
+    stationsG.appendChild(inner);
+    // hit target centered on THIS line's actual dot (not the station's raw center) — a hub's outer dots
+    // can sit up to ~12 units away from center, well outside a single shared r=9 target placed there.
+    // r is set for real in applyView() (STATION_HIT_R*inv, constant pixel size at every zoom) — this
+    // placeholder r is overwritten before the first paint.
+    const hit = el("circle", { cx:dotPt.x.toFixed(1), cy:dotPt.y.toFixed(1), r:7, class:"station-hit" });
+    dots.push({ el:c, inner:inner, lid:lid, hit:hit });
+    hit.addEventListener("click", function(e){
+      e.stopPropagation();
+      setSolo(STATIONS[sid].lines);
+      openStation(sid);
+    });
+    hitG.appendChild(hit);
+  });
+  stationEls[sid] = dots;
+});
+
+// --- label placement: figure out which side of the line has open space (away from the network's
+// center), then anchor the label so its NEAR edge (the end/start of the text) sits right next to the
+// station and the rest of the name grows away from the line — not centered, which let long names hang
+// back over the colored stroke. Collision relaxation still works off each label's true visual center. ---
+// Label direction — read directly off Suho's reference PDF (vector-extracted label-bbox-to-dot offsets,
+// 2026-09-19), NOT computed from local line angle. The PDF's own hand-placed labels are mostly pure E/W
+// even on 45° diagonal segments (e.g. Embarcadero→Civic Center is diagonal but every label there is W) —
+// only genuinely horizontal line segments get a N/S(-ish) label. This is a deliberate simplification Suho
+// made by hand, not a geometric rule, so it has to be a per-station lookup, not a formula.
+const STATION_LABEL_DIR = {
+  NCON:"NE", PITT:"NE", PCTR:"NE", ANTC:"NE", RICH:"W", CONC:"E", DELN:"W", PHIL:"E", PLZA:"W", WCRK:"E",
+  NBRK:"W", LAFY:"E", DBRK:"W", ORIN:"E", ASHB:"W", ROCK:"E", MCAR:"E", "19TH":"E", "12TH":"E", WOAK:"NW",
+  EMBR:"W", MONT:"W", LAKE:"E", POWL:"W", CIVC:"W", FTVL:"E", "16TH":"W", COLS:"E", "24TH":"W", OAKL:"W",
+  GLEN:"W", SANL:"E", BALB:"W", BAYF:"E", CAST:"NE", WDUB:"NE", DUBL:"NE", DALY:"W", COLM:"W", SSAN:"W",
+  HAYW:"E", SBRN:"W", SHAY:"E", SFIA:"W", MLBR:"W", UCTY:"E", FRMT:"E", WARM:"E", MLPT:"E", BERY:"E",
+};
+const COMPASS_VEC = {
+  N:{x:0,y:-1}, S:{x:0,y:1}, E:{x:1,y:0}, W:{x:-1,y:0},
+  NE:{x:0.7071,y:-0.7071}, NW:{x:-0.7071,y:-0.7071}, SE:{x:0.7071,y:0.7071}, SW:{x:-0.7071,y:0.7071},
+};
+// balanced word-wrap: try every space/"/" as a 2-line break, keep whichever leaves the two lines closest
+// in length (so e.g. "Pittsburg/Bay Point" breaks at the "/" -> "Pittsburg/" / "Bay Point", not some
+// lopsided split). A "/" break stays attached to the end of line 1 (kept visible); a space break is
+// simply dropped. Only called for the explicit WRAP_STATIONS list below.
+function wrapName(name){
+  const breaks = [];
+  for(let i=0;i<name.length;i++){ if(name[i]===" "||name[i]==="/") breaks.push(i); }
+  if(breaks.length===0) return null;
+  let best=null, bestDiff=Infinity;
+  breaks.forEach(function(i){
+    const isSlash = name[i]==="/";
+    const l1 = (isSlash ? name.slice(0,i+1) : name.slice(0,i)).trim();
+    const l2 = name.slice(i+1).trim();
+    if(!l1 || !l2) return;
+    const diff = Math.abs(l1.length-l2.length);
+    if(diff<bestDiff){ bestDiff=diff; best=[l1,l2]; }
+  });
+  return best;
+}
+// ONLY these 5 wrap to 2 lines — it's because their station spacing is too tight for a one-line label at
+// this font size, not because the name is long (several longer names elsewhere fit fine on one line).
+const WRAP_STATIONS = new Set(["NCON","PITT","PCTR","CAST","WDUB","DUBL","BERY"]);
+// termini at the end of a HORIZONTAL line read better extending straight out past the line (same
+// direction the line was heading) than perpendicular-above like the rest of that row's stations.
+const HORIZONTAL_TERMINUS = new Set(["ANTC","DUBL"]);
+// these 3 sit close enough together that keeping their 2nd text line snug against the dot (ignoring
+// label-to-label collision) matters more than uniform breathing room — user's explicit call.
+const TIGHT_NO_RELAX = new Set(["NCON","PITT","PCTR","DUBL","BERY"]);
+const rawLabelData = Object.keys(STATIONS).map(function(sid){
+  const st = STATIONS[sid];
+  const isHub = st.lines.length>1;
+  let offX, offY;
+  if(HORIZONTAL_TERMINUS.has(sid)){
+    const d = localDirection(sid, st.lines[0]), dl = Math.hypot(d.x,d.y)||1;
+    const dux = d.x/dl, duy = d.y/dl;
+    const pdfV = COMPASS_VEC[STATION_LABEL_DIR[sid]] || COMPASS_VEC.E;
+    const sign2 = (dux*pdfV.x + duy*pdfV.y) >= 0 ? 1 : -1; // localDirection can point either way along the
+    // line depending on whether this station is index 0 or the last in its line's path array — orient it
+    // to match the PDF's intended outward side instead of assuming a fixed direction.
+    offX = dux*sign2; offY = duy*sign2;
+  } else {
+    const pdfV = COMPASS_VEC[STATION_LABEL_DIR[sid]] || COMPASS_VEC.E;
+    const perp = stationPerpVec(sid);
+    const sign = (perp.x*pdfV.x + perp.y*pdfV.y) >= 0 ? 1 : -1;
+    offX = perp.x*sign; offY = perp.y*sign;
+  }
+  const fs = st.terminus ? 30 : 20;
+  const wrapped = WRAP_STATIONS.has(sid) ? wrapName(st.name) : null;
+  const lines = wrapped || [st.name];
+  const hw = Math.max.apply(null, lines.map(function(l){ return l.length*fs*0.29+4; }));
+  const lineH = fs*1.08;
+  const hh = lines.length>1 ? lineH : fs*0.62;
+  // this station's OWN candidate distance — the furthest any of its dots projects along (offX,offY),
+  // plus room for the largest a dot ever gets (max zoom) plus a small visual gap. Not used directly for
+  // the render position; grouped stations use the group's max instead (see below) so a whole corridor's
+  // labels land on one exact straight line instead of each drifting to its own station's exact geometry.
+  let maxProj = 0;
+  st.lines.forEach(function(lid){
+    const p = dotPositionForStation(lid, sid);
+    const proj = (p.x-st.x)*offX + (p.y-st.y)*offY;
+    if(proj>maxProj) maxProj = proj;
+  });
+  // NOTE: this clearance buffer is intentionally kept independent of DOTR_MAX (the max-zoom station-dot
+  // render radius, used only in applyView/styleForScale). Label position is computed ONCE here in fixed
+  // map-space units and never re-adjusted per zoom, whereas the actual dot's rendered size varies by zoom
+  // in a non-linear way (its SVG-space radius, dotR*inv, actually shrinks as scale grows). Wiring this to
+  // the bigger DOTR_MAX (2026-09-26 dot-size fix) pushed every label further from its station at every zoom
+  // level, not just max zoom — reverted to the original hand-tuned 11.5 to restore the old label spacing.
+  const dotR_max = 11.5, gap = 3;
+  // a 2-line block is placed by its CENTER (ly); without compensation the near edge (the line closest to
+  // the dot) ends up closer to the dot than a single-line label at the same distance would be — add half
+  // the block height back so the near EDGE, not the center, sits at the intended gap. Skipped for the
+  // tight/no-relax trio, which deliberately wants that closer distance.
+  const blockComp = (lines.length>1 && !TIGHT_NO_RELAX.has(sid)) ? lineH/2 : 0;
+  const ownNearDist = maxProj + dotR_max + gap + blockComp;
+  const groupKey = HORIZONTAL_TERMINUS.has(sid) ? ("HT|"+sid) : ((STATION_LABEL_DIR[sid]||"E") + "|" + st.lines.slice().sort().join(","));
+  return { sid:sid, isHub:isHub, terminus:st.terminus, offX:offX, offY:offY, lines:lines, lineH:lineH, hw:hw, hh:hh, ownNearDist:ownNearDist, groupKey:groupKey };
+});
+// group stations that share (label direction, exact line-set) — these are exactly the runs the user means
+// by "Richmond↔Ashby", "MacArthur/19th/12th", etc. — and give every member the GROUP's max near-distance,
+// so offsetting each station's raw (already-collinear) coordinate by the same vector keeps them collinear.
+const groupMaxDist = {};
+rawLabelData.forEach(function(d){ groupMaxDist[d.groupKey] = Math.max(groupMaxDist[d.groupKey]||0, d.ownNearDist); });
+const labelData = rawLabelData.map(function(d){
+  const st = STATIONS[d.sid];
+  const NEAR_DIST = groupMaxDist[d.groupKey];
+  const nearX = st.x + d.offX*NEAR_DIST, nearY = st.y + d.offY*NEAR_DIST;
+  let anchor, cx;
+  if(d.offX < -0.01){ anchor="end"; cx = nearX - d.hw; }
+  else if(d.offX > 0.01){ anchor="start"; cx = nearX + d.hw; }
+  else {
+    anchor = VERTICAL_ALIGN_OVERRIDE[d.sid] || DEFAULT_VERTICAL_ALIGN;
+    cx = anchor==="end" ? nearX - d.hw : nearX + d.hw;
+  }
+  return {
+    sid:d.sid, isHub:d.isHub, terminus:d.terminus, anchor:anchor, lines:d.lines, lineH:d.lineH,
+    lx: cx, ly: nearY, ox: cx, oy: nearY, // lx,ly = true visual center (used for collision math + capped drift)
+    hw: d.hw, hh: d.hh
+  };
+});
+// force exact even spacing + centering along these two corridors — relaxation (below) was nudging
+// individual labels for collision avoidance, which drifted their perpendicular distance from the line
+// (same angle down from the dots) inconsistently; this pins each member to the SAME perpendicular offset
+// it already had, just redistributed evenly along the corridor's own direction, centered on the group.
+function evenSpaceGroup(sids, spacing){
+  const members = sids.map(function(sid){ return labelData.find(function(d){return d.sid===sid;}); }).filter(Boolean);
+  const n = members.length; if(n<2) return;
+  function trueX(m){ return m.anchor==="end" ? m.ox+m.hw : (m.anchor==="start" ? m.ox-m.hw : m.ox); }
+  const tx0=trueX(members[0]), tx1=trueX(members[n-1]);
+  const dx0=tx1-tx0, dy0=members[n-1].oy-members[0].oy, dlen=Math.hypot(dx0,dy0)||1;
+  const ux=dx0/dlen, uy=dy0/dlen;
+  let cx=0,cy=0; members.forEach(function(m){cx+=trueX(m);cy+=m.oy;}); cx/=n; cy/=n;
+  const start=-(n-1)*spacing/2;
+  members.forEach(function(m,i){
+    const off=start+i*spacing, tx=cx+ux*off, ty=cy+uy*off;
+    m.lx = m.anchor==="end" ? tx-m.hw : (m.anchor==="start" ? tx+m.hw : tx);
+    m.ly = ty; m.ox=m.lx; m.oy=m.ly;
+  });
+}
+evenSpaceGroup(["EMBR","MONT","POWL","CIVC"], 26);
+evenSpaceGroup(["16TH","24TH","GLEN","BALB"], 20);
+const NO_RELAX_EXTRA = new Set(["EMBR","MONT","POWL","CIVC","16TH","24TH","GLEN","BALB"]);
+const MAX_DRIFT = 14; // keep the anchor tight to its own station — only small nudges allowed
+function clampDrift(d){
+  const dx=d.lx-d.ox, dy=d.ly-d.oy, dist=Math.hypot(dx,dy);
+  if(dist>MAX_DRIFT){ const k=MAX_DRIFT/dist; d.lx=d.ox+dx*k; d.ly=d.oy+dy*k; }
+}
+for(let iter=0; iter<8; iter++){
+  for(let i=0;i<labelData.length;i++){
+    for(let j=i+1;j<labelData.length;j++){
+      const a=labelData[i], b=labelData[j];
+      if(TIGHT_NO_RELAX.has(a.sid) || TIGHT_NO_RELAX.has(b.sid)) continue;
+      if(NO_RELAX_EXTRA.has(a.sid) || NO_RELAX_EXTRA.has(b.sid)) continue;
+      const dx=b.lx-a.lx, dy=b.ly-a.ly;
+      const overlapX = (a.hw+b.hw) - Math.abs(dx);
+      const overlapY = (a.hh+b.hh) - Math.abs(dy);
+      if(overlapX>0 && overlapY>0){
+        // prefer resolving along Y (keeps each label's distance-from-its-station intact, and makes a
+        // run of same-side stations stack in a clean, evenly spaced column instead of drifting sideways)
+        const push = overlapY/2 + 0.5, dir2 = dy>=0 ? 1 : (dy===0 ? (i<j?1:-1) : -1);
+        a.ly -= dir2*push; b.ly += dir2*push;
+      }
+    }
+  }
+  labelData.forEach(clampDrift);
+}
+const stationLabelEls = {};
+labelData.forEach(function(d){
+  const labelCls = ["station-label"];
+  if(d.terminus) labelCls.push("terminus");
+  if(d.isHub) labelCls.push("hub");
+  const NUDGE = { NCON:{dx:-3,dy:-7}, PITT:{dx:-3,dy:-7}, PCTR:{dx:-3,dy:-7}, CAST:{dx:-3,dy:-2}, WDUB:{dx:-3,dy:-2}, WOAK:{dx:3,dy:-4}, OAKL:{dx:0,dy:12}, DUBL:{dx:0,dy:-4} };
+  const nudge = NUDGE[d.sid] || {dx:0,dy:0};
+  // convert the relaxed visual-center (lx,ly) back to the actual near-edge anchor point for this anchor mode
+  const renderX = (d.anchor==="end" ? d.lx+d.hw : (d.anchor==="start" ? d.lx-d.hw : d.lx)) + nudge.dx;
+  const label = el("text", { x:renderX.toFixed(1), class:labelCls.join(" "), "text-anchor":d.anchor });
+  if(d.lines.length>1){
+    d.lines.forEach(function(lineText,i){
+      const tspan = el("tspan", { x:renderX.toFixed(1), "data-ly":(d.ly+nudge.dy).toFixed(1), "data-li":i, "data-n":d.lines.length });
+      tspan.textContent = lineText;
+      label.appendChild(tspan);
+    });
+  } else {
+    const yOverride = { ANTC:28 };
+    const y = yOverride[d.sid] != null ? yOverride[d.sid] : d.ly+4+nudge.dy;
+    label.setAttribute("y", y.toFixed(1));
+    label.textContent = d.lines[0];
+  }
+  label.addEventListener("click", function(e){
+    e.stopPropagation();
+    setSolo(STATIONS[d.sid].lines);
+    openStation(d.sid);
+  });
+  stationLabelEls[d.sid] = label;
+  stationLabelsG.appendChild(label);
+});
+
+/* ============================= PAN / ZOOM + LOD ============================= */
+
+const mapWrap = document.getElementById("mapWrap");
+const svg = document.getElementById("map");
+let view = { scale:1, tx:0, ty:0 };
+const BASE_VB = {x:-110,y:-110,w:VBW+100,h:VBH+60};
+
+// explicit, zoom-driven sizing (same idea as the label font-size counter-scaling below): compute a target
+// on-screen thickness for this zoom level, then divide by view.scale before setting the SVG attribute, so
+// the *actual rendered* size is exactly the target regardless of how much the viewBox itself is scaled.
+function styleForScale(scale){
+  const t = Math.max(0, Math.min(1, Math.log2(scale)/Math.log2(8)));
+  // Station-dot radius: two-segment curve. 4.5→9.1667 over scale 1→4 (t 0→2/3) is UNCHANGED from before —
+  // that size at scale=4 was already confirmed good. 9.1667→DOTR_MAX over scale 4→8 (t 2/3→1) is new and
+  // steeper, added 2026-09-26 to match v36's bigger dot size at max zoom (measured against v36.html at the
+  // same 3-click zoom-in: v36's dot rendered ~35px across vs v37's ~21px, so DOTR_MAX is picked to close
+  // that gap). See also DOTR_MAX below, which the label-placement clearance math also reads.
+  const T_BREAK = 2/3, DOTR_BREAK = 4.5+7*T_BREAK;
+  const dotR = t<=T_BREAK ? 4.5+t*7 : DOTR_BREAK + (DOTR_MAX-DOTR_BREAK)*(t-T_BREAK)/(1-T_BREAK);
+  return { weight: 6+t*34, dotR: dotR };
+}
+function updateLOD(){
+  svg.classList.remove('lod-region','lod-city','lod-detail');
+  if(view.scale>=3.2) svg.classList.add('lod-detail');
+  else if(view.scale>=1.7) svg.classList.add('lod-city');
+  else svg.classList.add('lod-region');
+}
+function applyView(){
+  const PAD_CLAMP = 110; // small allowance past the true edge, in BASE_VB units
+  const w = BASE_VB.w/view.scale, h = BASE_VB.h/view.scale;
+  const maxTx = PAD_CLAMP + (BASE_VB.w-w)/2;
+  const maxTy = PAD_CLAMP + (BASE_VB.h-h)/2;
+  view.tx = Math.max(-maxTx, Math.min(maxTx, view.tx));
+  view.ty = Math.max(-maxTy, Math.min(maxTy, view.ty));
+  const x = BASE_VB.x + (BASE_VB.w-w)/2 - view.tx;
+  const y = BASE_VB.y + (BASE_VB.h-h)/2 - view.ty;
+  svg.setAttribute("viewBox", x+" "+y+" "+w+" "+h);
+  const zf = Math.max(0.6, Math.min(2.6, view.scale));
+  document.querySelectorAll(".station-label:not(.terminus)").forEach(function(l){ l.setAttribute("font-size",(20/zf).toFixed(2)+"px"); });
+  document.querySelectorAll(".station-label.terminus").forEach(function(l){ l.setAttribute("font-size",(30/Math.max(0.85,zf*0.8)).toFixed(2)+"px"); });
+  document.querySelectorAll(".station-label tspan").forEach(function(t){
+    const ly = parseFloat(t.getAttribute("data-ly")), i = parseInt(t.getAttribute("data-li"),10), n = parseInt(t.getAttribute("data-n"),10);
+    const isTerminus = t.parentElement.classList.contains("terminus");
+    const fs = isTerminus ? (30/Math.max(0.85,zf*0.8)) : (20/zf);
+    const lineH = isTerminus ? fs*(34/30) : fs*1.15;
+    t.setAttribute("y", (ly - (n-1)*lineH/2 + 4 + i*lineH).toFixed(2));
+  });
+
+  const st = styleForScale(view.scale);
+  const inv = 1/view.scale;
+  LINE_ORDER.forEach(function(lid){
+    const target = st.weight * inv * THIN_FACTOR;
+    linePathEls[lid].forEach(function(p){ p.setAttribute("stroke-width", target.toFixed(3)); });
+    // hit area stays at v36's original (un-thinned) line thickness, so tapping a line is just as easy
+    // as before even though the rail itself now renders thin
+    const hitTarget = (lid==="beige" ? st.weight*0.6 : st.weight) * inv;
+    lineHitEls[lid].setAttribute("stroke-width", hitTarget.toFixed(3));
+  });
+  Object.keys(stationEls).forEach(function(sid){
+    stationEls[sid].forEach(function(d){
+      const r = st.dotR * inv; // station dot sized independently of line thickness now that lines are thin
+      d.el.setAttribute("r", r.toFixed(3));
+      const focused = d.el.classList.contains("focused");
+      d.el.setAttribute("stroke-width", ((focused ? 1.6 : 1.1) * inv).toFixed(3));
+      // Inner dot is a fixed PROPORTION of the outer radius (not a subtracted constant gap) so it reads as a
+      // normal radio button at every zoom level: ring width is already zoom-compensated above, so a constant
+      // ratio here keeps a consistent "small filled circle + visible white gap + thin ring" look throughout,
+      // rather than the inner dot swallowing almost the whole circle at max zoom (tried & rejected 2026-09-26).
+      d.inner.setAttribute("r", (r*DOT_INNER_RATIO).toFixed(3));
+      // Tap target: STATION_HIT_R*inv, so it's a constant, generous on-screen size at every zoom level
+      // (see STATION_HIT_R's own comment for why the old flat r:7 was unreliable right at the lod-city
+      // zoom threshold, i.e. exactly when stations first become clickable).
+      d.hit.setAttribute("r", (STATION_HIT_R*inv).toFixed(3));
+    });
+  });
+
+  updateLOD();
+}
+applyView();
+
+let dragging=false,lastX=0,lastY=0;
+let dragStartX=0,dragStartY=0,dragMoved=false;
+const ZOOM_MIN = 1.0, ZOOM_MAX = 8;
+function zoomByFactor(f){ view.scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.scale*f)); applyView(); }
+
+function clientToSvg(clientX, clientY){
+  const rect = mapWrap.getBoundingClientRect();
+  const w = BASE_VB.w/view.scale, h = BASE_VB.h/view.scale;
+  const x0 = BASE_VB.x + (BASE_VB.w-w)/2 - view.tx;
+  const y0 = BASE_VB.y + (BASE_VB.h-h)/2 - view.ty;
+  return { x: x0 + (clientX-rect.left)/rect.width*w, y: y0 + (clientY-rect.top)/rect.height*h };
+}
+// after view.scale has already been updated, shift tx/ty so svgPoint still lands under (clientX,clientY)
+function anchorViewTo(svgPoint, clientX, clientY){
+  const rect = mapWrap.getBoundingClientRect();
+  const w = BASE_VB.w/view.scale, h = BASE_VB.h/view.scale;
+  const x0 = svgPoint.x - (clientX-rect.left)/rect.width*w;
+  const y0 = svgPoint.y - (clientY-rect.top)/rect.height*h;
+  view.tx = BASE_VB.x + (BASE_VB.w-w)/2 - x0;
+  view.ty = BASE_VB.y + (BASE_VB.h-h)/2 - y0;
+}
+
+// multi-touch pinch-to-zoom + single-finger pan, built on the Pointer Events API (each touch gets its own
+// pointerId, so tracking a small map of active pointers gives real two-finger pinch without any library)
+const activePointers = new Map(); // pointerId -> {x,y}
+let pinchStartDist = null, pinchStartScale = 1, pinchAnchorSvg = null;
+
+function pinchMidpoint(){
+  const pts = Array.from(activePointers.values());
+  return { x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2 };
+}
+
+mapWrap.addEventListener("pointerdown", function(e){
+  const onTappable = e.target.closest && e.target.closest(".line-path, .line-hit, .station-hit, .station-label");
+  activePointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if(activePointers.size===1){
+    // don't steal a potential single-finger TAP on a line/station/label — capturing here would redirect
+    // the eventual click event to mapWrap instead of whatever was actually tapped. Still record the start
+    // point and let pointermove PROMOTE this to a real drag once it moves enough — that's what makes
+    // dragging from directly on top of a line actually pan, instead of doing nothing.
+    dragStartX=e.clientX; dragStartY=e.clientY; dragMoved=false;
+    if(onTappable) return;
+    try{ mapWrap.setPointerCapture(e.pointerId); }catch(err){}
+    dragging=true; lastX=e.clientX; lastY=e.clientY; mapWrap.classList.add("dragging");
+  } else if(activePointers.size===2){
+    try{ mapWrap.setPointerCapture(e.pointerId); }catch(err){}
+    dragging=false;
+    const pts = Array.from(activePointers.values());
+    pinchStartDist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y) || 1;
+    pinchStartScale = view.scale;
+    const mid = pinchMidpoint();
+    pinchAnchorSvg = clientToSvg(mid.x, mid.y);
+  }
+});
+mapWrap.addEventListener("pointermove", function(e){
+  if(!activePointers.has(e.pointerId)) return;
+  activePointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if(activePointers.size>=2 && pinchStartDist){
+    const pts = Array.from(activePointers.values()).slice(0,2);
+    const dist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y) || 1;
+    view.scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pinchStartScale*(dist/pinchStartDist)));
+    const mid = pinchMidpoint();
+    anchorViewTo(pinchAnchorSvg, mid.x, mid.y);
+    applyView();
+    return;
+  }
+  if(!dragging){
+    // a single pointer that started on a tappable element (line/station/label) and hasn't been promoted
+    // to a drag yet — promote it once it's moved enough to clearly be a pan, not a tap.
+    if(activePointers.size===1 && Math.hypot(e.clientX-dragStartX, e.clientY-dragStartY)>6){
+      try{ mapWrap.setPointerCapture(e.pointerId); }catch(err){}
+      dragging=true; dragMoved=true; lastX=e.clientX; lastY=e.clientY; mapWrap.classList.add("dragging");
+    }
+    return;
+  }
+  const dx=e.clientX-lastX, dy=e.clientY-lastY;
+  if(Math.hypot(e.clientX-dragStartX, e.clientY-dragStartY)>6) dragMoved=true;
+  const rect = mapWrap.getBoundingClientRect();
+  const k = (BASE_VB.w/view.scale)/rect.width;
+  view.tx += dx*k; view.ty += dy*k;
+  lastX=e.clientX; lastY=e.clientY;
+  applyView();
+});
+function endPointer(e){
+  activePointers.delete(e.pointerId);
+  if(activePointers.size<2){ pinchStartDist = null; }
+  if(activePointers.size===1){
+    const remaining = Array.from(activePointers.values())[0];
+    dragging = true; lastX = remaining.x; lastY = remaining.y;
+  } else if(activePointers.size===0){
+    dragging = false; mapWrap.classList.remove("dragging");
+  }
+}
+["pointerup","pointerleave","pointercancel"].forEach(function(ev){ mapWrap.addEventListener(ev, endPointer); });
+
+mapWrap.addEventListener("wheel", function(e){ e.preventDefault(); zoomByFactor(e.deltaY>0 ? (1/1.14) : 1.14); }, {passive:false});
+document.getElementById("zoomIn").addEventListener("click", function(){ zoomByFactor(2.0); });
+document.getElementById("zoomOut").addEventListener("click", function(){ zoomByFactor(0.5); });
+function focusStation(sid){ const st=STATIONS[sid]; view.scale=4; view.tx=(BASE_VB.x+BASE_VB.w/2)-st.x; view.ty=(BASE_VB.y+BASE_VB.h/2)-st.y; applyView(); }
+
+
+/* ============================= SEARCH ============================= */
+
+const searchInput = document.getElementById("searchInput");
+const searchResults = document.getElementById("searchResults");
+const searchWrap = document.getElementById("searchWrap");
+const searchIconBtn = document.getElementById("searchIconBtn");
+function openSearch(){
+  closeAlerts();
+  searchWrap.classList.add("open");
+  searchIconBtn.classList.add("hidden");
+  searchInput.focus();
+}
+function closeSearch(){
+  searchWrap.classList.remove("open");
+  searchIconBtn.classList.remove("hidden");
+  searchResults.classList.remove("open");
+  searchInput.value=""; searchResults.innerHTML="";
+}
+searchIconBtn.addEventListener("click", function(e){ e.stopPropagation(); openSearch(); });
+const stationList = Object.values(STATIONS).sort(function(a,b){return a.name.localeCompare(b.name);});
+function renderResults(q){
+  const ql = q.trim().toLowerCase();
+  const matches = ql ? stationList.filter(function(s){return s.name.toLowerCase().indexOf(ql)!==-1;}) : [];
+  searchResults.innerHTML="";
+  matches.slice(0,8).forEach(function(s){
+    const item = document.createElement("div");
+    item.className="item";
+    item.innerHTML = '<span class="chip" style="background:'+LINES[s.lines[0]].color+'"></span><span>'+s.name+'</span>';
+    item.addEventListener("click", function(){
+      setSolo(STATIONS[s.id].lines);
+      focusStation(s.id); openStation(s.id); closeSearch();
+    });
+    searchResults.appendChild(item);
+  });
+  searchResults.classList.toggle("open", matches.length>0);
+}
+searchInput.addEventListener("input", function(){ renderResults(searchInput.value); });
+searchInput.addEventListener("focus", function(){ renderResults(searchInput.value); });
+document.getElementById("app").addEventListener("click", function(e){
+  if(!searchWrap.contains(e.target) && e.target!==searchIconBtn){ closeSearch(); }
+});
+
+/* ============================= ALERTS (v35, demo data) ============================= */
+// Demo only — no real API call. A generic "line running N min behind" message was dropped: the live
+// train positions already show that on the map, so a redundant text readout just adds noise. What's
+// actually worth surfacing is a real service change (a train not completing its route, etc). Scoped to
+// the LINE, not just the one station it started at — it applies everywhere that line stops.
+const DEMO_ALERTS = [
+  { id:"a1", type:"cancel", scope:"line", lineId:"red", text:"A Red Line train is terminating early at 19th St — some riders must transfer." }
+];
+function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
+function alertsForStation(sid){
+  return DEMO_ALERTS.filter(function(a){
+    if(a.scope==="station") return a.stationId===sid;
+    if(a.scope==="line") return STATIONS[sid].lines.indexOf(a.lineId)!==-1;
+    return false;
+  });
+}
+function renderAlertsPanel(){
+  const list = document.getElementById("alertsList");
+  list.innerHTML = DEMO_ALERTS.length ? DEMO_ALERTS.map(function(a){
+    const scopeLabel = a.scope==="line" ? LINES[a.lineId].name : (a.scope==="station" ? STATIONS[a.stationId].name : "Systemwide");
+    return '<div class="item"><span class="ic">'+alertIcon(a.type)+'</span><div><strong>'+scopeLabel+'</strong><br>'+a.text+'</div></div>';
+  }).join("") : '<div class="empty">No active alerts.</div>';
+  alertsIconBtn.classList.toggle("hidden", !DEMO_ALERTS.length);
+}
+const alertsIconBtn = document.getElementById("alertsIconBtn");
+const alertsPanel = document.getElementById("alertsPanel");
+function openAlerts(){ closeSearch(); alertsPanel.classList.add("open"); alertsIconBtn.classList.add("hidden"); }
+function closeAlerts(){ alertsPanel.classList.remove("open"); if(DEMO_ALERTS.length) alertsIconBtn.classList.remove("hidden"); }
+alertsIconBtn.addEventListener("click", function(e){ e.stopPropagation(); openAlerts(); });
+document.getElementById("alertsPanelClose").addEventListener("click", function(e){ e.stopPropagation(); closeAlerts(); });
+document.getElementById("app").addEventListener("click", function(e){
+  if(!alertsPanel.contains(e.target) && e.target!==alertsIconBtn && !alertsIconBtn.contains(e.target)){ closeAlerts(); }
+});
+renderAlertsPanel();
+
+/* ============================= SOLO LINE / SHOW ALL ============================= */
+
+let soloLines = null;
+function updateFocusDots(){
+  if(!focusedStation) return;
+  const inv = 1/view.scale;
+  Object.keys(stationEls).forEach(function(id){
+    stationEls[id].forEach(function(dot){
+      const on = id===focusedStation && (!soloLines || soloLines.indexOf(dot.lid)!==-1);
+      dot.el.classList.toggle("focused", on);
+      dot.inner.classList.toggle("focused", on);
+      dot.el.setAttribute("stroke-width", ((on ? 1.6 : 1.1) * inv).toFixed(3));
+    });
+  });
+}
+function setSolo(lids){
+  soloLines = Array.isArray(lids) ? lids.slice() : [lids];
+  LINE_ORDER.forEach(function(id){
+    const dim = soloLines.indexOf(id)===-1;
+    linePathEls[id].forEach(function(p){ p.classList.toggle("dimmed", dim); });
+  });
+  Object.keys(stationEls).forEach(function(sid){
+    stationEls[sid].forEach(function(d){ d.el.classList.toggle("dimmed", soloLines.indexOf(d.lid)===-1); });
+    const onLine = STATIONS[sid].lines.some(function(l){ return soloLines.indexOf(l)!==-1; });
+    if(stationLabelEls[sid]) stationLabelEls[sid].classList.toggle("dimmed", !onLine);
+  });
+  updateFocusDots();
+  refreshTrainFilter();
+}
+function clearSolo(){
+  soloLines = null;
+  LINE_ORDER.forEach(function(id){
+    linePathEls[id].forEach(function(p){ p.classList.remove("dimmed"); });
+  });
+  Object.keys(stationEls).forEach(function(sid){
+    stationEls[sid].forEach(function(d){ d.el.classList.remove("dimmed"); });
+    if(stationLabelEls[sid]) stationLabelEls[sid].classList.remove("dimmed");
+  });
+  updateFocusDots();
+  refreshTrainFilter();
+}
+mapWrap.addEventListener("click", function(){
+  if(dragMoved){ dragMoved=false; return; }
+  if(soloLines) clearSolo();
+  if(popup.classList.contains("open")) closePopup();
+});
+
+/* ============================= POPUP ============================= */
+
+const popup = document.getElementById("popup");
+const popupName = document.getElementById("popupName");
+const popupBody = document.getElementById("popupBody");
+let focusedStation = null;
+function openStation(sid){
+  focusedStation = sid;
+  updateFocusDots();
+  popupName.textContent = STATIONS[sid].name;
+  renderPopupBody(sid);
+  popup.classList.add("open");
+}
+function closePopup(){
+  popup.classList.remove("open");
+  if(focusedStation){
+    const inv = 1/view.scale;
+    stationEls[focusedStation].forEach(function(dot){
+      dot.el.classList.remove("focused"); dot.inner.classList.remove("focused");
+      dot.el.setAttribute("stroke-width", (1.1*inv).toFixed(3));
+    });
+  }
+  focusedStation=null;
+}
+document.getElementById("popupClose").addEventListener("click", closePopup);
+function renderPopupBody(sid){
+  const st = STATIONS[sid];
+  const alertHtml = alertsForStation(sid).map(function(a){
+    return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+a.text+'</span></div>';
+  }).join("");
+  const rows = etdByStation[sid]||[];
+  if(!rows.length){ popupBody.innerHTML=alertHtml+'<div class="empty">No upcoming trains right now.</div>'; return; }
+  const row = function(e){
+    return '<div class="prow"><span class="sw" style="background:'+LINES[e.lineId].color+'"></span>'+
+      '<span class="dest">'+e.destination+'</span><span class="min">'+e.minutesLabel+'</span></div>';
+  };
+  // termini and Oakland Airport only ever have ONE real direction of travel — no point splitting those
+  // st.terminus (used for label bolding) isn't the same question as "does this station only have one
+  // direction of real travel" — Daly City IS a real terminus for blue/green, but red/yellow run straight
+  // through it to Millbrae, so it genuinely has two-way traffic and needs the north/south split below.
+  const isThrough = st.lines.some(function(lid){
+    const seq = LINES[lid].stations, oi = seq.indexOf(sid);
+    return oi>0 && oi<seq.length-1;
+  });
+  if(!isThrough){
+    const list = rows.slice().sort(function(a,b){ return a.minutesNum-b.minutesNum; }).slice(0,8);
+    popupBody.innerHTML = alertHtml + list.map(row).join("");
+    return;
+  }
+  // Which compass pair applies (N/S vs E/W) is a real-world geographic property of where this station's
+  // track physically runs — NOT simply "has orange or not". Two lineless-of-orange segments can point
+  // opposite ways in reality: the Rockridge/Concord trunk genuinely runs east (confirmed against BART's own
+  // usage — "Eastbound train leaving Rockridge"), while the Montgomery–SFO peninsula trunk genuinely runs
+  // north/south (BART's own official detailed map labels the Daly City transfer "TIMED TRANSFER NORTHBOUND/
+  // SOUTHBOUND"). So the axis is computed once per station from its REAL lat/lon neighbors (not the
+  // schematic's artistic x/y, which deliberately distorts angles to 45°/90°), then each row's own
+  // destination lat/lon decides which end of that axis it's heading toward.
+  // Which compass pair applies (N/S vs E/W) is mostly determined by whether orange serves the station —
+  // any station orange touches sits on the shared Richmond↔Berryessa trunk, which is a real north-south
+  // corridor system-wide. The one real exception: the SF Peninsula trunk south of Civic Center carries no
+  // orange service but is genuinely north-south in reality (BART's own official detailed map labels the
+  // Daly City transfer "TIMED TRANSFER NORTHBOUND/SOUTHBOUND") — a purely local real-lat/lon bearing check
+  // was tried and rejected here: immediate-neighbor geography is noisy (e.g. Bay Fair's real neighbors jog
+  // east-west even though the whole corridor it's on reads north-south), so this is an explicit exception
+  // list instead, matching what's actually confirmed against BART's own usage.
+  const PENINSULA_NS = new Set(["MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY","COLM","SSAN","SBRN","SFIA","MLBR"]);
+  const axisNS = st.lines.indexOf("orange")!==-1 || PENINSULA_NS.has(sid);
+  const groups = {};
+  rows.forEach(function(e){
+    let g;
+    if(e.lineId==="beige") g="Oakland Airport";
+    else {
+      const d = STATIONS[e.destSid];
+      g = axisNS ? (d.y < st.y ? "Northbound" : "Southbound") : (d.x < st.x ? "Westbound" : "Eastbound");
+      // Embarcadero is the hinge point right before the peninsula's north/south corridor starts (its very
+      // next stop, Montgomery, is already labeled that way) — so its peninsula-bound direction reads
+      // "Southbound" here too, instead of "Westbound", to stay consistent with where it's actually heading.
+      if(sid==="EMBR" && g==="Westbound") g="Southbound";
+    }
+    (groups[g] = groups[g]||[]).push(e);
+  });
+  const order = sid==="EMBR" ? ["Eastbound","Southbound","Oakland Airport"]
+    : axisNS ? ["Northbound","Southbound","Oakland Airport"] : ["Westbound","Eastbound","Oakland Airport"];
+  let html = "";
+  order.forEach(function(g){
+    if(!groups[g]) return;
+    const list = groups[g].sort(function(a,b){ return a.minutesNum-b.minutesNum; }).slice(0,3);
+    html += '<div class="pheading">'+g+'</div>' + list.map(row).join("");
+  });
+  popupBody.innerHTML = alertHtml + html;
+}
+
+/* ============================= LIVE DATA ============================= */
+
+const COLOR_TO_LINE = { ORANGE:"orange", RED:"red", YELLOW:"yellow", GREEN:"green", BLUE:"blue", BEIGE:"beige" };
+const BART_KEY = "MW9S-E7SL-26DU-VV8V"; // BART's published public demo key
+const ETD_URL = "https://api.bart.gov/api/etd.aspx?cmd=etd&orig=ALL&key="+BART_KEY+"&json=y";
+
+let etdByStation = {};
+let liveMode = false;
+
+function minutesToLabel(v){ return v==="Leaving" ? "Leaving" : v+" min"; }
+function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); return isNaN(n)?null:n; }
+function findDestIndex(seq, destText){
+  const dl = destText.toLowerCase();
+  for(let i=0;i<seq.length;i++){
+    const nm = STATIONS[seq[i]].name.toLowerCase();
+    if(nm.indexOf(dl)!==-1 || dl.indexOf(nm.split(" ")[0])!==-1) return i;
+  }
+  if(dl.indexOf("sfo")!==-1 || dl.indexOf("airport")!==-1){ const i=seq.indexOf("SFIA"); if(i!==-1) return i; }
+  return -1;
+}
+
+let trainMeta = {};
+function buildTrainMeta(){
+  const meta = {}; const now = Date.now();
+  Object.keys(etdByStation).forEach(function(sid){
+    etdByStation[sid].forEach(function(e){
+      const lid = e.lineId;
+      const seq = LINES[lid] && LINES[lid].stations;
+      if(!seq) return;
+      const oi = seq.indexOf(sid);
+      if(oi===-1) return;
+      let di = findDestIndex(seq, e.destination);
+      let sign = 1;
+      if(di!==-1 && di!==oi) sign = di>oi?1:-1; else sign = oi===0?1:-1;
+      const pi = oi-sign;
+      if(pi<0||pi>=seq.length) return;
+      const prevId = seq[pi];
+      const m = e.minutesNum;
+      if(m==null) return;
+      const hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[prevId], STATIONS[sid])/0.9));
+      if(m>hopMin*1.4) return;
+      const key = sid+"|"+lid+"|"+e.destination;
+      meta[key] = { lineId:lid, prevId:prevId, sid:sid, minutesAtFetch:m, hopMin:hopMin, fetchTime:now };
+    });
+  });
+  trainMeta = meta;
+}
+
+async function fetchETD(){
+  try{
+    const ctrl = new AbortController();
+    const t = setTimeout(function(){ctrl.abort();}, 7000);
+    const res = await fetch(ETD_URL, {signal:ctrl.signal});
+    clearTimeout(t);
+    if(!res.ok) throw new Error("bad status");
+    const data = await res.json();
+    const stationsArr = (data.root && data.root.station) || [];
+    const next = {};
+    stationsArr.forEach(function(st){
+      const sid = st.abbr;
+      if(!STATIONS[sid]) return;
+      const rows = [];
+      (st.etd||[]).forEach(function(etd){
+        (etd.estimate||[]).slice(0,1).forEach(function(est){
+          const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
+          if(!lid) return;
+          rows.push({ lineId:lid, destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
+        });
+      });
+      next[sid]=rows;
+    });
+    etdByStation = next;
+    liveMode = true;
+    buildTrainMeta();
+  }catch(err){
+    liveMode = false;
+    simulateETD();
+    simulateTrainMeta();
+  }
+  setStatus(liveMode);
+  if(focusedStation) renderPopupBody(focusedStation);
+}
+
+function hashStr(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return Math.abs(h); }
+function simulateETD(){
+  const next = {}; const now = Date.now();
+  Object.keys(STATIONS).forEach(function(sid){
+    const st = STATIONS[sid];
+    const rows = [];
+    st.lines.forEach(function(lid){
+      const seq = LINES[lid].stations;
+      const oi = seq.indexOf(sid);
+      [0,1].forEach(function(dir){
+        const termIdx = dir===0 ? seq.length-1 : 0;
+        const pi = dir===0 ? oi-1 : oi+1;
+        if(oi===termIdx){
+          // this station IS the terminus for this direction — there's no "previous stop" to hop a train
+          // in from (that's what used to silently produce zero rows here). Model it as a scheduled
+          // departure instead, using the line's real headway, heading toward the OTHER end of the line.
+          const headway = HEADWAY_BY_LINE[lid] || 20;
+          const span = headway*60000;
+          const phase = hashStr(sid+lid+dir+"dep") % span;
+          const pos = (now+phase) % span;
+          const m = Math.max(0.3, headway*(1-pos/span));
+          const otherEndIdx = dir===0 ? 0 : seq.length-1;
+          const destSid = seq[otherEndIdx];
+          rows.push({ lineId:lid, destSid:destSid, destination:STATIONS[destSid].name, minutesLabel:(m<1?"Leaving":Math.round(m)+" min"), minutesNum:m });
+          return;
+        }
+        if(pi<0||pi>=seq.length) return;
+        const hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[pi]], st)/0.9));
+        const span = hopMin*1.3*60000;
+        const phase = hashStr(sid+lid+dir) % span;
+        const pos = (now+phase) % span;
+        const m = Math.max(0.3, hopMin*1.3*(1-pos/span));
+        rows.push({ lineId:lid, destSid:seq[termIdx], destination:STATIONS[seq[termIdx]].name, minutesLabel:(m<1?"Leaving":Math.round(m)+" min"), minutesNum:m });
+      });
+    });
+    next[sid]=rows;
+  });
+  etdByStation = next;
+}
+
+const HEADWAY_BY_LINE = { yellow:10, orange:20, red:20, green:20, blue:20, beige:20 }; // BART's own published
+                                                                                        // typical frequency per line
+function lineDirectionHops(lid, forward){
+  const seq = LINES[lid].stations;
+  const order = forward ? seq : seq.slice().reverse();
+  const hops = [];
+  for(let i=0;i<order.length-1;i++){
+    const hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[order[i]], STATIONS[order[i+1]])/0.9));
+    hops.push({ prevId:order[i], sid:order[i+1], hopMin:hopMin });
+  }
+  return hops;
+}
+// demo mode used to put a synthetic train on every single block of every line at once — unrealistic and
+// way too busy. Instead simulate a handful of actual trips per line/direction, spaced at BART's real
+// published headway, each taking the full line's travel time to cross — matches what you'd actually see.
+function simulateTrainMeta(){
+  const meta = {};
+  const now = Date.now();
+  const nowMin = now/60000;
+  LINE_ORDER.forEach(function(lid){
+    const headway = HEADWAY_BY_LINE[lid] || 20;
+    [true,false].forEach(function(forward){
+      const hops = lineDirectionHops(lid, forward);
+      if(!hops.length) return;
+      const totalT = hops.reduce(function(s,h){ return s+h.hopMin; }, 0);
+      const n = Math.max(1, Math.round(totalT/headway));
+      const phase = hashStr(lid+forward) % 1000;
+      for(let k=0;k<n;k++){
+        const elapsed = (nowMin+phase+k*headway) % totalT;
+        let acc=0, chosen=null, intoHop=0;
+        for(let i=0;i<hops.length;i++){
+          if(elapsed < acc+hops[i].hopMin){ chosen=hops[i]; intoHop=elapsed-acc; break; }
+          acc += hops[i].hopMin;
+        }
+        if(!chosen) continue;
+        const minutesNum = Math.max(0.2, chosen.hopMin-intoHop);
+        const key = lid+"|"+(forward?"f":"b")+"|"+k;
+        meta[key] = { lineId:lid, prevId:chosen.prevId, sid:chosen.sid, minutesAtFetch:minutesNum, hopMin:chosen.hopMin, fetchTime:now };
+      }
+    });
+  });
+  trainMeta = meta;
+}
+
+function setStatus(live){
+  // no persistent badge for now — internal live/demo tracking (liveMode) stays, for a future
+  // connection-alert notification feature instead of an always-on status indicator
+}
+
+/* ============================= TRAINS — v2's shape: a single gradient rect, opaque head fading to a
+   transparent tail, now colored per line and riding the exact bezier curve its line is drawn on ============================= */
+
+const trainsG = document.getElementById("trains");
+const trainMarkers = {};
+
+function refreshTrainFilter(){
+  Object.keys(trainMarkers).forEach(function(k){
+    trainMarkers[k].el.style.display = (soloLines && soloLines.indexOf(trainMarkers[k].lineId)===-1) ? "none" : "";
+  });
+}
+
+function tick(){
+  const now = Date.now();
+  const st = styleForScale(view.scale);
+  const inv = 1/view.scale;
+  const activeKeys = {};
+  Object.keys(trainMeta).forEach(function(key){
+    const m = trainMeta[key];
+    activeKeys[key]=true;
+    const lineEl = linePathEls[m.lineId][0];
+    const total = pathLenAt[m.lineId].total;
+    const table = pathLenAt[m.lineId].table;
+    const Lprev = table[m.prevId], Lcur = table[m.sid];
+    if(Lprev==null || Lcur==null) return;
+    const elapsedMin = (now-m.fetchTime)/60000;
+    const curMin = Math.max(0, m.minutesAtFetch-elapsedMin);
+    const frac = Math.max(0, Math.min(1, 1-(curMin/m.hopMin)));
+    // v37b: same visual thickness the circle used (st.dotR is the station radius; trains ran ~1.7x that
+    // as a radius, so *2 for diameter), now stretched into a head→tail gradient trail — length = 2x its
+    // own thickness — colored in the train's own line color, riding the thin colored rail.
+    // TRAIN-FIX (2026-09-26): at low zoom (scale near ZOOM_MIN=1) this raw formula makes trainW bigger, in
+    // real map units, than the fixed geometric gap between adjacent parallel lines (OFFSET_PX-based) — so
+    // neighboring trains visually overlap/bleed into each other at the DEFAULT zoom even though they don't
+    // once zoomed in to scale=4 (already looked right there). `Math.min(1, view.scale/4)` leaves scale>=4
+    // completely unchanged and tapers the thickness down further the closer scale gets to 1, so trains stay
+    // clear of their neighbors at every zoom level, not just the higher ones.
+    const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4);
+    const lineLen = trainW*2.5;
+    const dir = Lcur>=Lprev ? 1 : -1;
+    const headLen = Lprev + frac*(Lcur-Lprev);
+    const tailLen = headLen - dir*lineLen;
+    const SAMPLES = 10;
+    let d = "", tailP = null, headP = null;
+    for(let i=0;i<=SAMPLES;i++){
+      const L = Math.max(0, Math.min(total, tailLen + (headLen-tailLen)*(i/SAMPLES)));
+      const p = lineEl.getPointAtLength(L);
+      if(i===0) tailP = p;
+      if(i===SAMPLES) headP = p;
+      d += (i===0 ? "M " : " L ") + p.x.toFixed(2) + " " + p.y.toFixed(2);
+    }
+
+    let rec = trainMarkers[key];
+    if(!rec){
+      const grad = makeTrainGradient(key, LINES[m.lineId].color);
+      const path = el("path", { class:"train", fill:"none", stroke:"url(#trainGrad-"+key+")" });
+      trainsG.appendChild(path);
+      rec = trainMarkers[key] = { el:path, grad:grad, lineId:m.lineId, expiring:null };
+    }
+    rec.grad.setAttribute("x1", tailP.x.toFixed(2)); rec.grad.setAttribute("y1", tailP.y.toFixed(2));
+    rec.grad.setAttribute("x2", headP.x.toFixed(2)); rec.grad.setAttribute("y2", headP.y.toFixed(2));
+    rec.expiring = null;
+    rec.el.style.opacity = "";
+    rec.el.setAttribute("d", d);
+    rec.el.setAttribute("stroke-width", trainW.toFixed(2));
+    if(soloLines) rec.el.style.display = (soloLines.indexOf(rec.lineId)===-1) ? "none" : "";
+  });
+  Object.keys(trainMarkers).forEach(function(k){
+    if(activeKeys[k]) return;
+    const rec = trainMarkers[k];
+    if(rec.expiring==null) rec.expiring = now;
+    const elapsed = now-rec.expiring;
+    if(elapsed>900){ rec.el.remove(); delete trainMarkers[k]; }
+    else{ rec.el.style.opacity = String(Math.max(0,1-elapsed/900)); }
+  });
+  requestAnimationFrame(tick);
+}
+
+/* ============================= BOOT ============================= */
+
+fetchETD();
+setInterval(fetchETD, 15000);
+setInterval(function(){ if(!liveMode){ simulateETD(); simulateTrainMeta(); } }, 5000);
+requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>
