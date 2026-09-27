@@ -1297,6 +1297,11 @@ function renderPopupBody(sid){
     if(e.lineId==="beige") g="Oakland Airport";
     else {
       const d = STATIONS[e.destSid];
+      // defensive: a real-API destination string that findDestSid() couldn't resolve (unexpected BART
+      // naming) used to crash here (reading .y off undefined) and silently kill the whole popup, even
+      // though the station dot had already been marked focused a moment earlier — see Known Bugs. Now it
+      // just drops this one row instead of aborting renderPopupBody entirely.
+      if(!d) return;
       g = axisNS ? (d.y < st.y ? "Northbound" : "Southbound") : (d.x < st.x ? "Westbound" : "Eastbound");
       // Embarcadero is the hinge point right before the peninsula's north/south corridor starts (its very
       // next stop, Montgomery, is already labeled that way) — so its peninsula-bound direction reads
@@ -1331,6 +1336,27 @@ let liveMode = false;
 
 function minutesToLabel(v){ return v==="Leaving" ? "Leaving" : v+" min"; }
 function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); return isNaN(n)?null:n; }
+// Resolves a real BART API destination string (e.g. "Warm Springs/ South Fremont", "SFO/Millbrae",
+// "Antioch") to one of our station ids, GLOBALLY across all stations (not scoped to one line's stop
+// list, unlike findDestIndex below which IS line-scoped and used only for train-position estimation).
+// Real API rows need this because, unlike simulateETD()'s synthetic rows, BART only gives us a display
+// name, not a station id — and renderPopupBody's direction grouping (Northbound/Southbound/etc.) requires
+// a real station id (destSid) to compare coordinates against. Missing this caused a hard crash in
+// renderPopupBody for every through-station once live data was flowing (fixed 2026-09-27 — see Known Bugs).
+function findDestSid(destText){
+  if(!destText) return null;
+  const dl = destText.toLowerCase();
+  if(dl.indexOf("oakland")!==-1 && dl.indexOf("airport")!==-1) return "OAKL";
+  if(dl.indexOf("sfo")!==-1 || dl.indexOf("airport")!==-1) return "SFIA";
+  let best = null;
+  Object.keys(STATIONS).some(function(sid){
+    const nm = STATIONS[sid].name.toLowerCase();
+    const nmFirst = nm.split(/[\s/]/)[0];
+    if(nm.indexOf(dl)!==-1 || dl.indexOf(nmFirst)!==-1){ best = sid; return true; }
+    return false;
+  });
+  return best;
+}
 function findDestIndex(seq, destText){
   const dl = destText.toLowerCase();
   for(let i=0;i<seq.length;i++){
@@ -1386,7 +1412,7 @@ async function fetchETD(){
         (etd.estimate||[]).slice(0,1).forEach(function(est){
           const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
           if(!lid) return;
-          rows.push({ lineId:lid, destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
+          rows.push({ lineId:lid, destSid:findDestSid(etd.destination), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
         });
       });
       next[sid]=rows;
