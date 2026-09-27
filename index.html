@@ -1178,16 +1178,31 @@ document.getElementById("app").addEventListener("click", function(e){
 });
 
 /* ============================= ALERTS ============================= */
-// No real BART service-alert feed is wired up yet — this list is empty by default so the alerts button
-// stays hidden (as designed: alertsIconBtn.classList.toggle("hidden", !DEMO_ALERTS.length) in
-// renderAlertsPanel below) until there's something real to show. Previously held a single hardcoded demo
-// entry (a fake "Red Line terminating early" alert) that never cleared, so the button stayed visible
-// permanently — fixed 2026-09-27. To test the alert UI again, temporarily push an object here matching the
-// shape below: { id, type: "cancel"|"delay", scope: "line"|"station", lineId or stationId, text }.
+// No real BART service-advisory feed (BSA) is wired up -- that would need a separate endpoint. But we
+// don't need one to answer "shouldn't a suspended line show an alert?" (asked 2026-09-27, after confirming
+// live that Green had zero real estimates system-wide while Red was running fine): fetchETD already knows,
+// every cycle, exactly which lines have ANY real train reported anywhere on the whole system. If a line has
+// zero real estimates while we're successfully in liveMode (i.e. this isn't just "BART's API is down",
+// since OTHER lines are fine), that is itself alert-worthy -- computeLiveAlerts() below derives that
+// directly from the real data instead of waiting on a separate advisory feed. DEMO_ALERTS stays as a manual
+// override list (empty by default) for the rare case someone wants to add a one-off note by hand.
 const DEMO_ALERTS = [];
+let liveAlerts = [];
+function activeAlerts(){ return DEMO_ALERTS.concat(liveAlerts); }
+function computeLiveAlerts(){
+  if(!liveMode){ liveAlerts = []; return; }
+  const seenLines = {};
+  Object.keys(etdByStation).forEach(function(sid){
+    etdByStation[sid].forEach(function(e){ seenLines[e.lineId] = true; });
+  });
+  liveAlerts = Object.keys(LINES).filter(function(lid){ return lid!=="beige" && !seenLines[lid]; }).map(function(lid){
+    return { id:"live-"+lid, type:"delay", scope:"line", lineId:lid,
+      text:"실시간 열차 정보가 없습니다 — 운행이 중단되었거나 지연되고 있을 수 있습니다." };
+  });
+}
 function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
 function alertsForStation(sid){
-  return DEMO_ALERTS.filter(function(a){
+  return activeAlerts().filter(function(a){
     if(a.scope==="station") return a.stationId===sid;
     if(a.scope==="line") return STATIONS[sid].lines.indexOf(a.lineId)!==-1;
     return false;
@@ -1195,16 +1210,17 @@ function alertsForStation(sid){
 }
 function renderAlertsPanel(){
   const list = document.getElementById("alertsList");
-  list.innerHTML = DEMO_ALERTS.length ? DEMO_ALERTS.map(function(a){
+  const alerts = activeAlerts();
+  list.innerHTML = alerts.length ? alerts.map(function(a){
     const scopeLabel = a.scope==="line" ? LINES[a.lineId].name : (a.scope==="station" ? STATIONS[a.stationId].name : "Systemwide");
     return '<div class="item"><span class="ic">'+alertIcon(a.type)+'</span><div><strong>'+scopeLabel+'</strong><br>'+a.text+'</div></div>';
   }).join("") : '<div class="empty">No active alerts.</div>';
-  alertsIconBtn.classList.toggle("hidden", !DEMO_ALERTS.length);
+  alertsIconBtn.classList.toggle("hidden", !alerts.length);
 }
 const alertsIconBtn = document.getElementById("alertsIconBtn");
 const alertsPanel = document.getElementById("alertsPanel");
 function openAlerts(){ closeSearch(); alertsPanel.classList.add("open"); alertsIconBtn.classList.add("hidden"); }
-function closeAlerts(){ alertsPanel.classList.remove("open"); if(DEMO_ALERTS.length) alertsIconBtn.classList.remove("hidden"); }
+function closeAlerts(){ alertsPanel.classList.remove("open"); if(activeAlerts().length) alertsIconBtn.classList.remove("hidden"); }
 alertsIconBtn.addEventListener("click", function(e){ e.stopPropagation(); openAlerts(); });
 document.getElementById("alertsPanelClose").addEventListener("click", function(e){ e.stopPropagation(); closeAlerts(); });
 document.getElementById("app").addEventListener("click", function(e){
@@ -1523,6 +1539,20 @@ function buildTrainMeta(){
       if(m==null) return;
       const totalToDest = m + pathTimeMin(seq, oi, di!==-1 ? di : (sign===1 ? seq.length-1 : 0));
       let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
+      // sid can BE the line's own origin terminus (e.g. a Millbrae-bound yellow train reported directly at
+      // ANTC, yellow's own first station) -- there is no station "before" it on this line to walk back
+      // into, so the very first prevIdx is out of range immediately (guard never even runs once). The old
+      // code just `return`ed here, silently dropping every train still sitting at (or just leaving) its own
+      // origin terminus -- confirmed live 2026-09-27: real ANTC/PCTR "SFO/Millbrae" rows were exactly this
+      // case, which is why Millbrae-bound yellow trains showed no map marker even though the popup had the
+      // info (the popup's data doesn't go through this walk-back at all, only the map does). Fixed: when
+      // there's truly no earlier station on this line, just place the train at sid itself (a zero-length
+      // hop) instead of dropping it -- it renders sitting at that station's dot, which is honest given we
+      // have no finer-grained position for a train still at its own origin.
+      if(prevIdx<0 || prevIdx>=seq.length){
+        placements.push({ lineId:lid, destination:e.destination, prevId:seq[oi], sid:seq[oi], minutesAtFetch:Math.min(m,1), hopMin:1, totalToDest:totalToDest, m:m });
+        return;
+      }
       while(prevIdx>=0 && prevIdx<seq.length && guard<40){
         guard++;
         hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[prevIdx]], STATIONS[seq[curIdx]])/0.9));
@@ -1593,6 +1623,8 @@ async function fetchETD(){
     simulateETD();
     simulateTrainMeta();
   }
+  computeLiveAlerts();
+  renderAlertsPanel();
   setStatus(liveMode);
   if(focusedStation) renderPopupBody(focusedStation);
 }
