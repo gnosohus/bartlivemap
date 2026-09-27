@@ -90,10 +90,21 @@
   #searchResults .item:hover{background:#f7f5ee;}
   #searchResults .chip{width:7px;height:7px;border-radius:50%;flex:0 0 auto;}
 
-  #zoomCtl{ position:absolute; left:14px; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:5; display:flex; flex-direction:column; overflow:hidden; border-radius:14px; box-shadow:var(--shadow); background:var(--card); }
+  /* zoom control lives bottom-right (2026-09-27: moved from bottom-left — the more standard corner for
+     map zoom controls, matching Google/Apple/Mapbox conventions), with the refresh button stacked directly
+     above it, same right edge, same family as the search/alerts icon buttons above. */
+  #zoomCtl{ position:absolute; right:14px; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:5; display:flex; flex-direction:column; overflow:hidden; border-radius:14px; box-shadow:var(--shadow); background:var(--card); }
   #zoomCtl button{ width:42px;height:42px;border:none;background:transparent;font-size:19px;color:var(--ink); cursor:pointer; }
   #zoomCtl button:first-child{border-bottom:1px solid #f0ede4;}
   #zoomCtl button:active{background:#f3f1e9;}
+
+  #refreshBtn{
+    position:absolute; right:14px; bottom:calc(24px + env(safe-area-inset-bottom) + 94px); z-index:5;
+    width:40px; height:40px; border-radius:50%; border:none; background:var(--card); color:var(--ink);
+    box-shadow:var(--shadow); cursor:pointer; display:flex; align-items:center; justify-content:center;
+  }
+  #refreshBtn svg{ transition:transform .5s ease; }
+  #refreshBtn.spinning svg{ transform:rotate(360deg); }
 
   #popup{
     position:absolute; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%) translateY(12px);
@@ -143,6 +154,9 @@
   <div id="alertsPanel"><button class="pclose" id="alertsPanelClose">×</button><h3>Alerts</h3><div id="alertsList"></div></div>
 
 
+  <button id="refreshBtn" title="Refresh live data" aria-label="Refresh live data">
+    <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>
+  </button>
   <div id="zoomCtl">
     <button id="zoomIn">+</button>
     <button id="zoomOut">–</button>
@@ -1097,6 +1111,18 @@ function endPointer(e){
 mapWrap.addEventListener("wheel", function(e){ e.preventDefault(); zoomByFactor(e.deltaY>0 ? (1/1.14) : 1.14); }, {passive:false});
 document.getElementById("zoomIn").addEventListener("click", function(){ zoomByFactor(2.0); });
 document.getElementById("zoomOut").addEventListener("click", function(){ zoomByFactor(0.5); });
+
+const refreshBtn = document.getElementById("refreshBtn");
+let refreshInFlight = false;
+refreshBtn.addEventListener("click", function(e){
+  e.stopPropagation();
+  if(refreshInFlight) return;
+  refreshInFlight = true;
+  refreshBtn.classList.add("spinning");
+  Promise.resolve(fetchETD()).finally(function(){
+    setTimeout(function(){ refreshBtn.classList.remove("spinning"); refreshInFlight = false; }, 500);
+  });
+});
 function focusStation(sid){ const st=STATIONS[sid]; view.scale=4; view.tx=(BASE_VB.x+BASE_VB.w/2)-st.x; view.ty=(BASE_VB.y+BASE_VB.h/2)-st.y; applyView(); }
 
 
@@ -1142,14 +1168,14 @@ document.getElementById("app").addEventListener("click", function(e){
   if(!searchWrap.contains(e.target) && e.target!==searchIconBtn){ closeSearch(); }
 });
 
-/* ============================= ALERTS (v35, demo data) ============================= */
-// Demo only — no real API call. A generic "line running N min behind" message was dropped: the live
-// train positions already show that on the map, so a redundant text readout just adds noise. What's
-// actually worth surfacing is a real service change (a train not completing its route, etc). Scoped to
-// the LINE, not just the one station it started at — it applies everywhere that line stops.
-const DEMO_ALERTS = [
-  { id:"a1", type:"cancel", scope:"line", lineId:"red", text:"A Red Line train is terminating early at 19th St — some riders must transfer." }
-];
+/* ============================= ALERTS ============================= */
+// No real BART service-alert feed is wired up yet — this list is empty by default so the alerts button
+// stays hidden (as designed: alertsIconBtn.classList.toggle("hidden", !DEMO_ALERTS.length) in
+// renderAlertsPanel below) until there's something real to show. Previously held a single hardcoded demo
+// entry (a fake "Red Line terminating early" alert) that never cleared, so the button stayed visible
+// permanently — fixed 2026-09-27. To test the alert UI again, temporarily push an object here matching the
+// shape below: { id, type: "cancel"|"delay", scope: "line"|"station", lineId or stationId, text }.
+const DEMO_ALERTS = [];
 function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
 function alertsForStation(sid){
   return DEMO_ALERTS.filter(function(a){
