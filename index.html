@@ -1394,13 +1394,37 @@ let liveMode = false;
 
 function minutesToLabel(v){ return v==="Leaving" ? "Leaving" : v+" min"; }
 function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); return isNaN(n)?null:n; }
-// Resolves a real BART API destination string (e.g. "Warm Springs/ South Fremont", "SFO/Millbrae",
-// "Antioch") to one of our station ids, GLOBALLY across all stations (not scoped to one line's stop
-// list, unlike findDestIndex below which IS line-scoped and used only for train-position estimation).
+// Fallback text-matcher used only when BART's own `abbreviation` field (see resolveDestSid below) is
+// missing -- resolves a real BART API destination string (e.g. "Warm Springs/ South Fremont", "SFO/
+// Millbrae", "Antioch") to one of our station ids, GLOBALLY across all stations.
 // Real API rows need this because, unlike simulateETD()'s synthetic rows, BART only gives us a display
 // name, not a station id — and renderPopupBody's direction grouping (Northbound/Southbound/etc.) requires
 // a real station id (destSid) to compare coordinates against. Missing this caused a hard crash in
 // renderPopupBody for every through-station once live data was flowing (fixed 2026-09-27 — see Known Bugs).
+// UNIFIED DESTINATION RESOLUTION (2026-09-27, reported by user -- "노란색 밀브레행 트레인 하나도 안 뜨는데
+// 정보도 안 나오고, 열차는 보이는데 역 정보에는 안 뜨는 경우도 있다"): confirmed against BART's real live feed
+// that this had TWO separate causes. (1) BART's real destination TEXT is genuinely messy/inconsistent --
+// e.g. the actual live text is "SF Airport" (no "O"), not "SFO Airport" as assumed -- so the token
+// matcher's own first-word gate (nmTok[0]="sfo" must appear in destTok) silently REJECTED it and returned
+// null, which is exactly why some real yellow-line trains showed neither a map marker nor popup info: this
+// wasn't a rendering bug, it was destSid resolution failing on real BART wording no one had tested against.
+// (2) the map (buildTrainMeta, via its own findDestIndex text-matcher) and the popup (via findDestSid, a
+// separate text-matcher) used to run TWO INDEPENDENT resolutions of the same destination text -- so a
+// wording quirk that broke one but not the other produced exactly "train visible on the map but missing
+// from that station's popup" (or vice versa), because the two paths could disagree with each other.
+// Fixed properly, not by patching more special cases into the text matcher: BART's real API already
+// includes a machine-readable `etd.abbreviation` field with the exact destination station code (confirmed
+// live -- e.g. destination:"SF Airport" always comes with abbreviation:"SFIA", destination:"SFO/Millbrae"
+// with abbreviation:"MLBR"). resolveDestSid() below uses that directly whenever it's a valid station code,
+// and only falls back to the fuzzy name-token matcher for the rare case it's missing (e.g. simulateETD()'s
+// synthetic rows, which invent destination text but no abbreviation). Both fetchETD (which builds the
+// popup's rows) and buildTrainMeta (which places map markers) now call the SAME function and store the SAME
+// resolved id on the row (row.destSid) -- there is only one destSid per row now, computed once, so the map
+// and the popup can no longer disagree about what a row's destination actually is.
+function resolveDestSid(destText, abbreviation){
+  if(abbreviation && STATIONS[abbreviation]) return abbreviation;
+  return findDestSid(destText);
+}
 // Both destination-lookups below used to do a raw substring test (dl.indexOf(nmFirst)), which broke on
 // two kinds of real BART text: (1) a station's first word can occur as a plain SUBSTRING inside another
 // station's name with no word boundary at all -- "san" (San Leandro's first word) sits right inside
@@ -1435,18 +1459,6 @@ function findDestSid(destText){
     const matched = nmTok.filter(function(t){ return destTok.indexOf(t)!==-1; }).length;
     const score = matched*1000 + matched/nmTok.length;
     if(score>bestScore){ best=sid; bestScore=score; }
-  });
-  return best;
-}
-function findDestIndex(seq, destText){
-  const destTok = nameTokens(destText);
-  let best = -1, bestScore = -1;
-  seq.forEach(function(sid, i){
-    const nmTok = nameTokens(STATIONS[sid].name);
-    if(destTok.indexOf(nmTok[0])===-1) return;
-    const matched = nmTok.filter(function(t){ return destTok.indexOf(t)!==-1; }).length;
-    const score = matched*1000 + matched/nmTok.length;
-    if(score>bestScore){ best=i; bestScore=score; }
   });
   return best;
 }
@@ -1502,7 +1514,9 @@ function buildTrainMeta(){
       if(!seq) return;
       const oi = seq.indexOf(sid);
       if(oi===-1) return;
-      let di = findDestIndex(seq, e.destination);
+      // di now comes from the SAME resolved destSid the popup uses (e.destSid, see resolveDestSid above) --
+      // no more separate text-matching pass here that could disagree with the popup's.
+      let di = e.destSid ? seq.indexOf(e.destSid) : -1;
       let sign = 1;
       if(di!==-1 && di!==oi) sign = di>oi?1:-1; else sign = oi===0?1:-1;
       const m = e.minutesNum;
@@ -1566,7 +1580,7 @@ async function fetchETD(){
         (etd.estimate||[]).slice(0,2).forEach(function(est){
           const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
           if(!lid) return;
-          rows.push({ lineId:lid, destSid:findDestSid(etd.destination), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
+          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
         });
       });
       next[sid]=rows;
