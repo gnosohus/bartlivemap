@@ -1401,19 +1401,13 @@ function renderPopupBody(sid){
     return '<div class="prow"><span class="sw" style="background:'+LINES[e.lineId].color+'"></span>'+
       '<span class="dest">'+e.destination+'</span><span class="min">'+e.minutesLabel+'</span></div>';
   };
-  // termini and Oakland Airport only ever have ONE real direction of travel — no point splitting those
-  // st.terminus (used for label bolding) isn't the same question as "does this station only have one
-  // direction of real travel" — Daly City IS a real terminus for blue/green, but red/yellow run straight
-  // through it to Millbrae, so it genuinely has two-way traffic and needs the north/south split below.
-  const isThrough = st.lines.some(function(lid){
-    const seq = LINES[lid].stations, oi = seq.indexOf(sid);
-    return oi>0 && oi<seq.length-1;
-  });
-  if(!isThrough){
-    const list = rows.slice().sort(function(a,b){ return a.minutesNum-b.minutesNum; }).slice(0,8);
-    popupBody.innerHTML = alertHtml + list.map(row).join("");
-    return;
-  }
+  // A true terminus (e.g. Richmond, Antioch, Dublin/Pleasanton, Berryessa, Millbrae) naturally has only
+  // ONE direction of real travel, so it doesn't need a special case here -- the grouping logic below
+  // (same one every other station uses) simply never populates the OTHER direction's group for it, and
+  // the single populated group renders with the same pheading + max-2-rows format as everywhere else.
+  // (Previously had a separate branch here that skipped the direction header and showed up to 8 rows for
+  // any non-through station -- removed 2026-09-27 per user request: Richmond was losing its direction
+  // label and showing 5 rows instead of the normal 2-per-direction format for no real reason.)
   // Which compass pair applies (N/S vs E/W) is a real-world geographic property of where this station's
   // track physically runs — NOT simply "has orange or not". Two lineless-of-orange segments can point
   // opposite ways in reality: the Rockridge/Concord trunk genuinely runs east (confirmed against BART's own
