@@ -52,10 +52,15 @@
 
   .card{ background:var(--card); border-radius:16px; box-shadow:var(--shadow); }
 
+  /* touch-action:manipulation on every round icon button below (2026-09-27 fix): #mapWrap already has
+     touch-action:none so double-tapping the MAP does nothing, but these 4 buttons had no touch-action of
+     their own, so a double-tap on any of them (very natural when repeatedly tapping zoom +/- or refresh)
+     triggered the browser's native double-tap-to-zoom instead -- viewport's user-scalable=no doesn't
+     reliably suppress that on its own, touch-action is what actually does it per-element. */
   #searchIconBtn{
     position:absolute; top:14px; left:14px; z-index:6; width:40px; height:40px; border-radius:50%;
     border:none; background:var(--card); color:var(--ink); box-shadow:var(--shadow); cursor:pointer;
-    display:flex; align-items:center; justify-content:center;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation;
   }
   #searchIconBtn.hidden{ display:none; }
 
@@ -63,7 +68,7 @@
   #alertsIconBtn{
     position:absolute; top:14px; right:14px; z-index:6; width:40px; height:40px; border-radius:50%;
     border:none; background:var(--card); color:var(--ink); box-shadow:var(--shadow); cursor:pointer;
-    display:flex; align-items:center; justify-content:center;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation;
   }
   #alertsIconBtn.hidden{ display:none; }
   #alertsPanel{
@@ -94,7 +99,7 @@
      map zoom controls, matching Google/Apple/Mapbox conventions), with the refresh button stacked directly
      above it, same right edge, same family as the search/alerts icon buttons above. */
   #zoomCtl{ position:absolute; right:14px; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:5; display:flex; flex-direction:column; overflow:hidden; border-radius:14px; box-shadow:var(--shadow); background:var(--card); }
-  #zoomCtl button{ width:42px;height:42px;border:none;background:transparent;font-size:19px;color:var(--ink); cursor:pointer; }
+  #zoomCtl button{ width:42px;height:42px;border:none;background:transparent;font-size:19px;color:var(--ink); cursor:pointer; touch-action:manipulation; }
   #zoomCtl button:first-child{border-bottom:1px solid #f0ede4;}
   #zoomCtl button:active{background:#f3f1e9;}
 
@@ -102,6 +107,7 @@
     position:absolute; right:14px; bottom:calc(24px + env(safe-area-inset-bottom) + 94px); z-index:5;
     width:40px; height:40px; border-radius:50%; border:none; background:var(--card); color:var(--ink);
     box-shadow:var(--shadow); cursor:pointer; display:flex; align-items:center; justify-content:center;
+    touch-action:manipulation;
   }
   #refreshBtn svg{ transition:transform .5s ease; }
   #refreshBtn.spinning svg{ transform:rotate(360deg); }
@@ -1320,11 +1326,28 @@ function renderPopupBody(sid){
   // list instead, matching what's actually confirmed against BART's own usage.
   const PENINSULA_NS = new Set(["MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY","COLM","SSAN","SBRN","SFIA","MLBR"]);
   const axisNS = st.lines.indexOf("orange")!==-1 || PENINSULA_NS.has(sid);
+  // 12th St and Lake Merritt are real 3-way forks, not simple North/South hubs: at each, SOME of the
+  // lines' very next real stop (in that line's own stop order) is West Oakland, while orange's is not --
+  // e.g. at 12th, red/yellow head to West Oakland next while orange heads to Lake Merritt next, even
+  // though both "look" like the same southbound direction by raw coordinates. Forcing everything through
+  // the single axisNS North/South split mislabeled the West Oakland-bound trains as South (fixed
+  // 2026-09-27, see Known Bugs) -- pull them into their own Westbound group instead, the same way Oakland
+  // Airport already gets its own group at Coliseum rather than being folded into North/South there.
+  const WOAK_FORK_STATIONS = new Set(["12TH","LAKE"]);
+  function nextStopToward(lid, fromSid, destSid){
+    const seq = LINES[lid].stations, oi = seq.indexOf(fromSid), di = seq.indexOf(destSid);
+    if(oi===-1) return null;
+    const sign = (di!==-1 && di!==oi) ? (di>oi?1:-1) : (oi===0?1:-1);
+    const ni = oi+sign;
+    return (ni>=0 && ni<seq.length) ? seq[ni] : null;
+  }
   const groups = {};
   rows.forEach(function(e){
     let g;
     if(e.lineId==="beige") g="Oakland Airport";
-    else {
+    else if(WOAK_FORK_STATIONS.has(sid) && nextStopToward(e.lineId, sid, e.destSid)==="WOAK"){
+      g = "Westbound";
+    } else {
       const d = STATIONS[e.destSid];
       // defensive: a real-API destination string that findDestSid() couldn't resolve (unexpected BART
       // naming) used to crash here (reading .y off undefined) and silently kill the whole popup, even
@@ -1340,6 +1363,7 @@ function renderPopupBody(sid){
     (groups[g] = groups[g]||[]).push(e);
   });
   const order = sid==="EMBR" ? ["Eastbound","Southbound","Oakland Airport"]
+    : WOAK_FORK_STATIONS.has(sid) ? ["Northbound","Southbound","Westbound","Oakland Airport"]
     : axisNS ? ["Northbound","Southbound","Oakland Airport"] : ["Westbound","Eastbound","Oakland Airport"];
   let html = "";
   order.forEach(function(g){
@@ -1372,28 +1396,49 @@ function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); r
 // name, not a station id — and renderPopupBody's direction grouping (Northbound/Southbound/etc.) requires
 // a real station id (destSid) to compare coordinates against. Missing this caused a hard crash in
 // renderPopupBody for every through-station once live data was flowing (fixed 2026-09-27 — see Known Bugs).
+// Both destination-lookups below used to do a raw substring test (dl.indexOf(nmFirst)), which broke on
+// two kinds of real BART text: (1) a station's first word can occur as a plain SUBSTRING inside another
+// station's name with no word boundary at all -- "san" (San Leandro's first word) sits right inside
+// "pleaSANton", so a real "Dublin/Pleasanton" destination silently resolved to San Leandro, which is what
+// caused West Dublin/Castro Valley's Eastbound/Westbound to look swapped (fixed 2026-09-27, see Known
+// Bugs); (2) a genuinely shared whole WORD ("North" in both "North Berkeley" and "Berryessa/North San
+// Jose", "Bay" in both "Bay Fair" and "Pittsburg/Bay Point") still matches multiple stations even with
+// word-boundary tokenizing alone, and the first one in STATIONS' key order silently won regardless of fit.
+// Fixed by scoring every candidate: how many of the CANDIDATE's own name-tokens actually appear in the
+// destination text (as whole tokens, not substrings), and taking the best-covered candidate instead of the
+// first name-token match found. A station whose full name exactly reappears in the text (the normal case --
+// BART's real destination strings are usually a close variant of the terminus's own name) always outscores
+// one that only shares a single incidental word.
+function nameTokens(s){ return s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean); }
 function findDestSid(destText){
   if(!destText) return null;
   const dl = destText.toLowerCase();
   if(dl.indexOf("oakland")!==-1 && dl.indexOf("airport")!==-1) return "OAKL";
   if(dl.indexOf("sfo")!==-1 || dl.indexOf("airport")!==-1) return "SFIA";
-  let best = null;
-  Object.keys(STATIONS).some(function(sid){
-    const nm = STATIONS[sid].name.toLowerCase();
-    const nmFirst = nm.split(/[\s/]/)[0];
-    if(nm.indexOf(dl)!==-1 || dl.indexOf(nmFirst)!==-1){ best = sid; return true; }
-    return false;
+  const destTok = nameTokens(destText);
+  let best = null, bestScore = -1;
+  Object.keys(STATIONS).forEach(function(sid){
+    const nmTok = nameTokens(STATIONS[sid].name);
+    if(destTok.indexOf(nmTok[0])===-1) return; // station's own first word must appear as a whole token
+    const matched = nmTok.filter(function(t){ return destTok.indexOf(t)!==-1; }).length;
+    const score = matched*1000 + matched/nmTok.length;
+    if(score>bestScore){ best=sid; bestScore=score; }
   });
   return best;
 }
 function findDestIndex(seq, destText){
   const dl = destText.toLowerCase();
-  for(let i=0;i<seq.length;i++){
-    const nm = STATIONS[seq[i]].name.toLowerCase();
-    if(nm.indexOf(dl)!==-1 || dl.indexOf(nm.split(" ")[0])!==-1) return i;
-  }
   if(dl.indexOf("sfo")!==-1 || dl.indexOf("airport")!==-1){ const i=seq.indexOf("SFIA"); if(i!==-1) return i; }
-  return -1;
+  const destTok = nameTokens(destText);
+  let best = -1, bestScore = -1;
+  seq.forEach(function(sid, i){
+    const nmTok = nameTokens(STATIONS[sid].name);
+    if(destTok.indexOf(nmTok[0])===-1) return;
+    const matched = nmTok.filter(function(t){ return destTok.indexOf(t)!==-1; }).length;
+    const score = matched*1000 + matched/nmTok.length;
+    if(score>bestScore){ best=i; bestScore=score; }
+  });
+  return best;
 }
 
 let trainMeta = {};
