@@ -1397,10 +1397,16 @@ function findDestIndex(seq, destText){
 }
 
 let trainMeta = {};
+// BART's own ETD minutes is "time until arrival AT sid" -- for a train more than one hop out (common once
+// fetchETD keeps all of BART's real estimates, not just the soonest), the old version only ever checked the
+// single immediately-adjacent hop and silently dropped anything farther, which is why a station could show
+// e.g. 3 real upcoming trains on one line while the map only ever drew 1. Fixed 2026-09-27: walk backward
+// hop-by-hop, subtracting each hop's real travel time, until the remaining minutes land inside one hop --
+// that hop becomes the train's actual prevId/sid pair, however many stations back that turns out to be.
 function buildTrainMeta(){
   const meta = {}; const now = Date.now();
   Object.keys(etdByStation).forEach(function(sid){
-    etdByStation[sid].forEach(function(e){
+    etdByStation[sid].forEach(function(e, idx){
       const lid = e.lineId;
       const seq = LINES[lid] && LINES[lid].stations;
       if(!seq) return;
@@ -1409,15 +1415,24 @@ function buildTrainMeta(){
       let di = findDestIndex(seq, e.destination);
       let sign = 1;
       if(di!==-1 && di!==oi) sign = di>oi?1:-1; else sign = oi===0?1:-1;
-      const pi = oi-sign;
-      if(pi<0||pi>=seq.length) return;
-      const prevId = seq[pi];
       const m = e.minutesNum;
       if(m==null) return;
-      const hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[prevId], STATIONS[sid])/0.9));
-      if(m>hopMin*1.4) return;
-      const key = sid+"|"+lid+"|"+e.destination;
-      meta[key] = { lineId:lid, prevId:prevId, sid:sid, minutesAtFetch:m, hopMin:hopMin, fetchTime:now };
+      let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
+      while(prevIdx>=0 && prevIdx<seq.length && guard<40){
+        guard++;
+        hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[prevIdx]], STATIONS[seq[curIdx]])/0.9));
+        const nextPrevIdx = prevIdx-sign;
+        if(remaining<=hopMin*1.4 || nextPrevIdx<0 || nextPrevIdx>=seq.length) break;
+        remaining -= hopMin;
+        curIdx = prevIdx;
+        prevIdx = nextPrevIdx;
+      }
+      if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
+      const prevId = seq[prevIdx], curId = seq[curIdx];
+      // idx (this estimate's rank at sid, soonest-first) keeps the 2nd/3rd real train on the same
+      // line+destination from overwriting the 1st -- each becomes its own marker.
+      const key = sid+"|"+lid+"|"+e.destination+"|"+idx;
+      meta[key] = { lineId:lid, prevId:prevId, sid:curId, minutesAtFetch:remaining, hopMin:hopMin, fetchTime:now };
     });
   });
   trainMeta = meta;
@@ -1438,7 +1453,10 @@ async function fetchETD(){
       if(!STATIONS[sid]) return;
       const rows = [];
       (st.etd||[]).forEach(function(etd){
-        (etd.estimate||[]).slice(0,1).forEach(function(est){
+        // Keep up to 3 real upcoming trains per line/destination (was slice(0,1), which threw away
+        // BART's 2nd/3rd real estimates entirely) -- matches the popup's own "up to 3 per direction" rule
+        // and lets buildTrainMeta place multiple real trains on the map instead of just the soonest one.
+        (etd.estimate||[]).slice(0,3).forEach(function(est){
           const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
           if(!lid) return;
           rows.push({ lineId:lid, destSid:findDestSid(etd.destination), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
