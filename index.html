@@ -1188,6 +1188,11 @@ document.getElementById("app").addEventListener("click", function(e){
 // override list (empty by default) for the rare case someone wants to add a one-off note by hand.
 const DEMO_ALERTS = [];
 let liveAlerts = [];
+// Schedule-based closures (e.g. Green Line's weekday-only hours) are expected, not a service problem -- per
+// user request 2026-09-27, these no longer appear in the global alert button/panel at all (a dot + icon
+// there reads like something is wrong, when it's just the normal published schedule). They're kept in this
+// separate list and shown ONLY inline in the popup of a station that line actually serves.
+let scheduleClosures = [];
 function activeAlerts(){ return DEMO_ALERTS.concat(liveAlerts); }
 // Known, fixed BART schedule rules (published service patterns, not derived from live data) -- asked for
 // 2026-09-27 so a line with zero live data can be explained as "this is normal, it just doesn't run right
@@ -1217,24 +1222,39 @@ function scheduleNote(lid){
   return null;
 }
 function computeLiveAlerts(){
-  if(!liveMode){ liveAlerts = []; return; }
+  if(!liveMode){ liveAlerts = []; scheduleClosures = []; return; }
   const seenLines = {};
   Object.keys(etdByStation).forEach(function(sid){
     etdByStation[sid].forEach(function(e){ seenLines[e.lineId] = true; });
   });
-  liveAlerts = Object.keys(LINES).filter(function(lid){ return lid!=="beige" && !seenLines[lid]; }).map(function(lid){
+  liveAlerts = [];
+  scheduleClosures = [];
+  Object.keys(LINES).filter(function(lid){ return lid!=="beige" && !seenLines[lid]; }).forEach(function(lid){
     const note = scheduleNote(lid);
-    return { id:"live-"+lid, type:"delay", scope:"line", lineId:lid,
-      text: note || "No live train data right now — service may be suspended or delayed." };
+    if(note){
+      // expected, by-schedule closure -- popup-only, not a global alert (see scheduleClosures above)
+      scheduleClosures.push({ id:"sched-"+lid, type:"cancel", scope:"line", lineId:lid, text:note });
+    } else {
+      liveAlerts.push({ id:"live-"+lid, type:"delay", scope:"line", lineId:lid,
+        text:"No live train data right now — service may be suspended or delayed." });
+    }
   });
 }
+// "cancel" = a red no-entry circle with a horizontal white bar (⛔) -- used for "this genuinely isn't
+// running right now" (a by-schedule closure, or the Oakland Connector outside its hours), never for a real
+// service problem. "delay" = a warning triangle (⚠️) -- reserved for an unexpected zero-data line, i.e. an
+// actual possible service issue, which is why it's the one that still surfaces in the global alert panel.
 function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
 function alertsForStation(sid){
-  return activeAlerts().filter(function(a){
+  const fromActive = activeAlerts().filter(function(a){
     if(a.scope==="station") return a.stationId===sid;
     if(a.scope==="line") return STATIONS[sid].lines.indexOf(a.lineId)!==-1;
     return false;
   });
+  const fromSchedule = scheduleClosures.filter(function(a){
+    return a.scope==="line" && STATIONS[sid].lines.indexOf(a.lineId)!==-1;
+  });
+  return fromActive.concat(fromSchedule);
 }
 function renderAlertsPanel(){
   const list = document.getElementById("alertsList");
@@ -1356,8 +1376,10 @@ function oakScheduleText(){
   const now = new Date();
   const [start, end] = oakHoursForDay(now.getDay());
   const hour = now.getHours();
-  if(hour<start || hour>=end) return "Not running right now — next service starts "+formatHour12(start)+".";
-  return "Every 4–5 min.";
+  // No trailing period -- matches the style of a real row's minutes field ("4 min"), which never ends in
+  // punctuation either, so this reads as one more field in that field, not a separate sentence.
+  if(hour<start || hour>=end) return "Not running — starts "+formatHour12(start);
+  return "Every 4–5 min";
 }
 function renderPopupBody(sid){
   const st = STATIONS[sid];
@@ -1365,9 +1387,14 @@ function renderPopupBody(sid){
     return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+a.text+'</span></div>';
   }).join("");
   const rows = etdByStation[sid]||[];
-  const oakScheduleHtml = '<div class="pheading">Oakland Airport</div><div class="prow">'+
+  // Formatted as a normal destination row (swatch + dest + gray min-style field), matching every other
+  // line's rows, instead of one hand-written sentence -- per user request 2026-09-27. "Oakland Airport
+  // Shuttle" as the section header (not just "Oakland Airport", which read like a destination, not a
+  // section) and the row's own destination is the OTHER end of the shuttle from wherever this popup is.
+  const oakDest = sid==="COLS" ? "Oakland Airport" : "Coliseum";
+  const oakScheduleHtml = '<div class="pheading">Oakland Airport Shuttle</div><div class="prow">'+
     '<span class="sw" style="background:'+LINES.beige.color+'"></span>'+
-    '<span class="dest">'+oakScheduleText()+'</span></div>';
+    '<span class="dest">'+oakDest+'</span><span class="min">'+oakScheduleText()+'</span></div>';
   if(sid==="OAKL"){ popupBody.innerHTML = alertHtml + oakScheduleHtml; return; }
   if(!rows.length){ popupBody.innerHTML=alertHtml+'<div class="empty">No upcoming trains right now.</div>'+(sid==="COLS"?oakScheduleHtml:""); return; }
   const row = function(e){
@@ -1637,32 +1664,44 @@ function buildTrainMeta(){
       placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:remaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
     });
   });
-  // Group by (line, destination, rank) instead of clustering on totalToDest proximity. Why this is correct
-  // and the old approach wasn't: BART's own estimate[] array at each station is already rank-ordered
-  // soonest-first, and trains physically cannot pass each other on a single track -- so "the Nth-soonest
-  // Millbrae-bound Red train reported by station A" and "the Nth-soonest Millbrae-bound Red train reported
-  // by station B" are guaranteed to be the SAME physical train, for any two stations A and B on that route,
-  // regardless of how far apart they are. The old code instead tried to recognize "same train" by checking
-  // whether two reports' computed totalToDest (m + a crude haversine-distance/0.9-km-per-min hop-time
-  // estimate) landed within +-2 minutes of each other -- fine for a short 2-3 hop chain, but confirmed
-  // (2026-09-27, using real captured Red-line data across all ~23 stations) to drift far more than 2 minutes
-  // over a full ~50-minute route, which fractured single real trains into many false "different" ones (32
-  // entries counted for Red instead of the ~6 expected from headway/route-time math). Grouping by rank needs
-  // no tolerance at all -- it's an exact match -- so this drift can't cause overcounting anymore.
-  const byGroup = {};
+  // Grouping strictly by (line, destination, rank) -- tried 2026-09-27 -- turned out to UNDER-count on a
+  // long route: BART's estimate array is rank-ordered per REPORTING STATION, not system-wide, so "rank 0 at
+  // station A" and "rank 0 at station B" are only the same physical train if that train hasn't yet passed
+  // whichever of A/B is farther down the line. Confirmed against real captured Red-line data (2026-09-27):
+  // Red's Richmond<->Millbrae route takes ~100 real minutes end-to-end (seen directly in the totalToDest
+  // spread below) with a 20-min headway, so ~5 distinct trains are in transit each direction at once --
+  // grouping by rank alone (only 2-3 ranks tracked) collapsed multiple genuinely different trains together
+  // and under-counted (reported "too few trains" 2026-09-27).
+  //
+  // Back to clustering on totalToDest (m + a crude haversine-distance/0.9-km-per-min hop-time estimate to
+  // the destination), which IS a valid same-train test for reports from stations close enough together that
+  // the model's error stays small -- the problem before was a flat +-2min tolerance, too tight once that
+  // crude model's error accumulates over 20+ hops on a long route. Since real distinct trains are spaced
+  // ~one headway apart in totalToDest by definition, using HALF the line's own published headway as the
+  // tolerance (HEADWAY_BY_LINE, defined below) absorbs that accumulated drift while still being tight enough
+  // to never merge two genuinely different trains (which are never closer than one full headway apart).
+  // Verified against real Red-line data: this now finds 6 clusters per direction (matching the ~100min /
+  // 20min headway math), instead of 32 (flat +-2min, drift-broken) or 2 (rank-only, position-blind).
+  const byLineDest = {};
   placements.forEach(function(p){
-    const key = p.lineId+"|"+p.destination+"|"+p.rank;
-    (byGroup[key] = byGroup[key]||[]).push(p);
+    const key = p.lineId+"|"+p.destination;
+    (byLineDest[key] = byLineDest[key]||[]).push(p);
   });
   const meta = {};
-  Object.keys(byGroup).forEach(function(key){
-    // Within one (line, destination, rank) group, every entry is a report of the SAME physical train from a
-    // different reporting station -- pick the one with the smallest raw m (closest to arrival) as the
-    // representative, since the station nearest that train's current position gives the most accurate,
-    // most current placement.
-    let rep = null;
-    byGroup[key].forEach(function(p){ if(!rep || p.m<rep.m) rep = p; });
-    meta[key] = { lineId:rep.lineId, prevId:rep.prevId, sid:rep.sid, minutesAtFetch:rep.minutesAtFetch, hopMin:rep.hopMin, fetchTime:now };
+  Object.keys(byLineDest).forEach(function(key){
+    const lid = key.split("|")[0];
+    const tol = (HEADWAY_BY_LINE[lid]||20) * 0.5;
+    const list = byLineDest[key].slice().sort(function(a,b){ return a.totalToDest-b.totalToDest; });
+    let clusterRep = null, clusterIdx = 0;
+    list.forEach(function(p){
+      if(!clusterRep || p.totalToDest-clusterRep.totalToDest>tol){
+        clusterIdx++;
+        clusterRep = p;
+      } else if(p.m<clusterRep.m){
+        clusterRep = p; // a report closer to arrival is more current -- use its (more accurate) placement
+      }
+      meta[key+"|"+clusterIdx] = { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
+    });
   });
   const shuttle = buildOakShuttleMeta(now);
   if(shuttle) meta["beige|shuttle"] = shuttle;
@@ -1711,15 +1750,16 @@ async function fetchETD(){
       if(!STATIONS[sid]) return;
       const rows = [];
       (st.etd||[]).forEach(function(etd){
-        // Keep up to 2 real upcoming trains per line/destination (was slice(0,1), which threw away
-        // BART's 2nd/3rd real estimates entirely; briefly slice(0,3), lowered to 2 on 2026-09-27 per user
-        // request -- matches the popup's own "up to 2 per direction" rule and lets buildTrainMeta place
-        // more than one real train on the map instead of just the soonest one, without over-fetching.
-        (etd.estimate||[]).slice(0,2).forEach(function(est, rank){
+        // Keep ALL of BART's real upcoming-train estimates per line/destination here (was capped to 2, to
+        // match the popup's own "max 2 per direction" display rule -- but that cap belongs to the POPUP's
+        // rendering, not to this shared data pool: buildTrainMeta needs every available estimate (BART
+        // gives up to 3) to correctly cluster trains by headway on a long route (2026-09-27 fix -- see
+        // buildTrainMeta). The popup still independently slices to 2 when it renders its own rows below.
+        (etd.estimate||[]).forEach(function(est, rank){
           const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
           if(!lid) return;
-          // rank = this estimate's position within BART's OWN per-station list for this line+destination
-          // (0 = soonest at this station). See buildTrainMeta for why this replaces distance-based matching.
+          // rank is no longer used for train-identity matching (see buildTrainMeta) but is kept as a cheap
+          // tie-breaker / diagnostic field.
           rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes), rank:rank });
         });
       });
