@@ -1319,8 +1319,12 @@ function renderPopupBody(sid){
 /* ============================= LIVE DATA ============================= */
 
 const COLOR_TO_LINE = { ORANGE:"orange", RED:"red", YELLOW:"yellow", GREEN:"green", BLUE:"blue", BEIGE:"beige" };
-const BART_KEY = "MW9S-E7SL-26DU-VV8V"; // BART's published public demo key
-const ETD_URL = "https://api.bart.gov/api/etd.aspx?cmd=etd&orig=ALL&key="+BART_KEY+"&json=y";
+// Real BART ETD data is fetched through our own /api/etd serverless function (see /api/etd.js), which
+// calls api.bart.gov server-side and relays the JSON back. api.bart.gov does not send CORS headers, so a
+// direct browser fetch to it is blocked by the browser regardless of https vs file:// — a server-side
+// proxy is required, not just an https host. (Fixed 2026-09-27: this used to hit api.bart.gov directly
+// from the client, which silently failed CORS on every host and always fell back to simulateETD().)
+const ETD_URL = "/api/etd";
 
 let etdByStation = {};
 let liveMode = false;
