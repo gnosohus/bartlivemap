@@ -1326,14 +1326,20 @@ function renderPopupBody(sid){
   // list instead, matching what's actually confirmed against BART's own usage.
   const PENINSULA_NS = new Set(["MONT","POWL","CIVC","16TH","24TH","GLEN","BALB","DALY","COLM","SSAN","SBRN","SFIA","MLBR"]);
   const axisNS = st.lines.indexOf("orange")!==-1 || PENINSULA_NS.has(sid);
-  // 12th St and Lake Merritt are real 3-way forks, not simple North/South hubs: at each, SOME of the
-  // lines' very next real stop (in that line's own stop order) is West Oakland, while orange's is not --
-  // e.g. at 12th, red/yellow head to West Oakland next while orange heads to Lake Merritt next, even
-  // though both "look" like the same southbound direction by raw coordinates. Forcing everything through
-  // the single axisNS North/South split mislabeled the West Oakland-bound trains as South (fixed
-  // 2026-09-27, see Known Bugs) -- pull them into their own Westbound group instead, the same way Oakland
-  // Airport already gets its own group at Coliseum rather than being folded into North/South there.
-  const WOAK_FORK_STATIONS = new Set(["12TH","LAKE"]);
+  // WHICH end of the axisNS/E-W axis a row is heading toward used to be decided by comparing the FAR
+  // terminus's coordinates to this station's -- wrong whenever the route bends between here and there.
+  // e.g. a Dublin-bound blue train leaving 16th St first heads back up through Civic Center (genuinely
+  // NORTH), even though Dublin itself sits far to the south/east on the map -- this showed Dublin-bound
+  // trains as "Southbound" at 16th St (confirmed as a real bug 2026-09-27, reported by user). Fixed by
+  // comparing this station's REAL lat/lon to its IMMEDIATE NEXT real stop toward that destination
+  // (nextStopToward), not to the destination itself -- that one hop's direction is always locally correct
+  // no matter how the route curves further out. Also switched from the schematic's distorted x/y to real
+  // lat/lon for this comparison (the schematic deliberately draws everything at 45°/90° angles, which was
+  // already noted above as wrong for this purpose but never actually fixed until now).
+  // (12th St/Lake Merritt's West Oakland-bound trains were briefly split into their own 3rd "Westbound"
+  // group to patch around this same underlying bug -- reverted 2026-09-27 per user request: every station
+  // now shows a simple 2-group North/South (or East/West) split, same as everywhere else. The destination
+  // name on each row already tells you which physical train it is, so a 3rd bucket isn't needed for that.)
   function nextStopToward(lid, fromSid, destSid){
     const seq = LINES[lid].stations, oi = seq.indexOf(fromSid), di = seq.indexOf(destSid);
     if(oi===-1) return null;
@@ -1345,16 +1351,16 @@ function renderPopupBody(sid){
   rows.forEach(function(e){
     let g;
     if(e.lineId==="beige") g="Oakland Airport";
-    else if(WOAK_FORK_STATIONS.has(sid) && nextStopToward(e.lineId, sid, e.destSid)==="WOAK"){
-      g = "Westbound";
-    } else {
+    else {
       const d = STATIONS[e.destSid];
       // defensive: a real-API destination string that findDestSid() couldn't resolve (unexpected BART
-      // naming) used to crash here (reading .y off undefined) and silently kill the whole popup, even
+      // naming) used to crash here (reading .lat off undefined) and silently kill the whole popup, even
       // though the station dot had already been marked focused a moment earlier — see Known Bugs. Now it
       // just drops this one row instead of aborting renderPopupBody entirely.
       if(!d) return;
-      g = axisNS ? (d.y < st.y ? "Northbound" : "Southbound") : (d.x < st.x ? "Westbound" : "Eastbound");
+      const nextId = nextStopToward(e.lineId, sid, e.destSid);
+      const n = (nextId && STATIONS[nextId]) || d;
+      g = axisNS ? (n.lat > st.lat ? "Northbound" : "Southbound") : (n.lon > st.lon ? "Eastbound" : "Westbound");
       // Embarcadero is the hinge point right before the peninsula's north/south corridor starts (its very
       // next stop, Montgomery, is already labeled that way) — so its peninsula-bound direction reads
       // "Southbound" here too, instead of "Westbound", to stay consistent with where it's actually heading.
@@ -1363,12 +1369,11 @@ function renderPopupBody(sid){
     (groups[g] = groups[g]||[]).push(e);
   });
   const order = sid==="EMBR" ? ["Eastbound","Southbound","Oakland Airport"]
-    : WOAK_FORK_STATIONS.has(sid) ? ["Northbound","Southbound","Westbound","Oakland Airport"]
     : axisNS ? ["Northbound","Southbound","Oakland Airport"] : ["Westbound","Eastbound","Oakland Airport"];
   let html = "";
   order.forEach(function(g){
     if(!groups[g]) return;
-    const list = groups[g].sort(function(a,b){ return a.minutesNum-b.minutesNum; }).slice(0,3);
+    const list = groups[g].sort(function(a,b){ return a.minutesNum-b.minutesNum; }).slice(0,2);
     html += '<div class="pheading">'+g+'</div>' + list.map(row).join("");
   });
   popupBody.innerHTML = alertHtml + html;
@@ -1410,11 +1415,18 @@ function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); r
 // BART's real destination strings are usually a close variant of the terminus's own name) always outscores
 // one that only shares a single incidental word.
 function nameTokens(s){ return s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean); }
+// Both functions used to hard-return SFIA/OAKL the moment destText contained "sfo" or "airport", BEFORE
+// the token-scoring logic below ever ran. That always won even when the real text was "SFO/Millbrae" --
+// BART legitimately short-turns some yellow-line trips at SFO and continues others to Millbrae, so that
+// text should resolve to MLBR (the true terminus for that trip), not always SFIA (fixed 2026-09-27, see
+// Known Bugs). Removed: the token scorer below already handles every real case correctly on its own --
+// "SFO/Millbrae" scores MLBR higher (its whole name "millbrae" is one token, a full-coverage match) than
+// SFIA (only "sfo" matches, "airport" doesn't appear in the text) -- and a bare "SFO Airport" (no Millbrae
+// mentioned) still scores SFIA correctly since SFIA's own tokens ["sfo","airport"] are both present.
+// "Oakland International Airport" -> OAKL falls out the same way (both of OAKL's tokens match), so that
+// shortcut was equally unnecessary. Verified with a standalone Node test against these exact strings.
 function findDestSid(destText){
   if(!destText) return null;
-  const dl = destText.toLowerCase();
-  if(dl.indexOf("oakland")!==-1 && dl.indexOf("airport")!==-1) return "OAKL";
-  if(dl.indexOf("sfo")!==-1 || dl.indexOf("airport")!==-1) return "SFIA";
   const destTok = nameTokens(destText);
   let best = null, bestScore = -1;
   Object.keys(STATIONS).forEach(function(sid){
@@ -1427,8 +1439,6 @@ function findDestSid(destText){
   return best;
 }
 function findDestIndex(seq, destText){
-  const dl = destText.toLowerCase();
-  if(dl.indexOf("sfo")!==-1 || dl.indexOf("airport")!==-1){ const i=seq.indexOf("SFIA"); if(i!==-1) return i; }
   const destTok = nameTokens(destText);
   let best = -1, bestScore = -1;
   seq.forEach(function(sid, i){
@@ -1448,10 +1458,45 @@ let trainMeta = {};
 // e.g. 3 real upcoming trains on one line while the map only ever drew 1. Fixed 2026-09-27: walk backward
 // hop-by-hop, subtracting each hop's real travel time, until the remaining minutes land inside one hop --
 // that hop becomes the train's actual prevId/sid pair, however many stations back that turns out to be.
+//
+// DUPLICATE MARKERS (found + fixed 2026-09-27, reported by user): the walk-back above is done once per
+// REPORTING station, but BART's ETD reports the SAME physical train from every station along its approach
+// simultaneously (each with a proportionally different minutes-to-arrival for that platform, sometimes
+// 3-4 stations upstream). The old version keyed each computed placement by the reporting station
+// (sid+lid+destination+idx), so one real train reported by several upstream stations produced that many
+// separate map markers, all landing on the same or a near-identical hop -- this is the "너무 많이 보여,
+// 중복" the user saw, not a calculation error.
+// First attempt at a fix grouped placements by their computed final hop (line+prevId+sid) and clustered by
+// the hop-local `remaining` minutes -- but that is NOT robust: the backward walk-back above can land on a
+// DIFFERENT hop for two reports of the very same train, purely because each report starts its walk from a
+// different `m` and the per-hop time estimate (haversine distance / 0.9, clamped 1-6 min) doesn't divide
+// evenly, so small rounding differences between stations' reports compound over 2-3 hops and tip the walk
+// into the neighboring hop's bucket -- verified this actually happens with realistic numbers (train 2 min
+// from 12th St, 5 min from West Oakland, 11 min from Embarcadero -- physically one train, but two of those
+// three land one hop apart after backward-walking). Fixed properly by computing, for every report, a single
+// robust "total minutes until arrival at the FINAL destination" (sum every hop's time from the reporting
+// station all the way to the destination, no backward walk, no early-break) -- that total is an invariant
+// of the physical train and comes out the same (within rounding) no matter which station along the route
+// reported it. Group by line+destination, cluster by that total (~2 min tolerance) to collapse the same
+// train's multiple reports into one, then take the report closest to arrival (smallest raw minutesNum --
+// the most current estimate) as the representative and use ONLY that one's already-correct backward-walked
+// prevId/sid/hopMin/remaining for where to actually draw it on the map.
+function pathTimeMin(seq, fromIdx, toIdx){
+  if(fromIdx===toIdx) return 0;
+  const sign = toIdx>fromIdx ? 1 : -1;
+  let total = 0, i = fromIdx, guard = 0;
+  while(i!==toIdx && guard<60){
+    guard++;
+    total += Math.max(1, Math.min(6, haversineKm(STATIONS[seq[i]], STATIONS[seq[i+sign]])/0.9));
+    i += sign;
+  }
+  return total;
+}
 function buildTrainMeta(){
-  const meta = {}; const now = Date.now();
+  const now = Date.now();
+  const placements = [];
   Object.keys(etdByStation).forEach(function(sid){
-    etdByStation[sid].forEach(function(e, idx){
+    etdByStation[sid].forEach(function(e){
       const lid = e.lineId;
       const seq = LINES[lid] && LINES[lid].stations;
       if(!seq) return;
@@ -1462,6 +1507,7 @@ function buildTrainMeta(){
       if(di!==-1 && di!==oi) sign = di>oi?1:-1; else sign = oi===0?1:-1;
       const m = e.minutesNum;
       if(m==null) return;
+      const totalToDest = m + pathTimeMin(seq, oi, di!==-1 ? di : (sign===1 ? seq.length-1 : 0));
       let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
       while(prevIdx>=0 && prevIdx<seq.length && guard<40){
         guard++;
@@ -1473,11 +1519,26 @@ function buildTrainMeta(){
         prevIdx = nextPrevIdx;
       }
       if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
-      const prevId = seq[prevIdx], curId = seq[curIdx];
-      // idx (this estimate's rank at sid, soonest-first) keeps the 2nd/3rd real train on the same
-      // line+destination from overwriting the 1st -- each becomes its own marker.
-      const key = sid+"|"+lid+"|"+e.destination+"|"+idx;
-      meta[key] = { lineId:lid, prevId:prevId, sid:curId, minutesAtFetch:remaining, hopMin:hopMin, fetchTime:now };
+      placements.push({ lineId:lid, destination:e.destination, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:remaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
+    });
+  });
+  const byLineDest = {};
+  placements.forEach(function(p){
+    const key = p.lineId+"|"+p.destination;
+    (byLineDest[key] = byLineDest[key]||[]).push(p);
+  });
+  const meta = {};
+  Object.keys(byLineDest).forEach(function(key){
+    const list = byLineDest[key].sort(function(a,b){ return a.totalToDest-b.totalToDest; });
+    let clusterRep = null, clusterIdx = 0;
+    list.forEach(function(p){
+      if(!clusterRep || p.totalToDest-clusterRep.totalToDest>2){
+        clusterIdx++;
+        clusterRep = p;
+      } else if(p.m<clusterRep.m){
+        clusterRep = p; // a report closer to arrival is more current -- use its (more accurate) placement
+      }
+      meta[key+"|"+clusterIdx] = { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
     });
   });
   trainMeta = meta;
@@ -1498,10 +1559,11 @@ async function fetchETD(){
       if(!STATIONS[sid]) return;
       const rows = [];
       (st.etd||[]).forEach(function(etd){
-        // Keep up to 3 real upcoming trains per line/destination (was slice(0,1), which threw away
-        // BART's 2nd/3rd real estimates entirely) -- matches the popup's own "up to 3 per direction" rule
-        // and lets buildTrainMeta place multiple real trains on the map instead of just the soonest one.
-        (etd.estimate||[]).slice(0,3).forEach(function(est){
+        // Keep up to 2 real upcoming trains per line/destination (was slice(0,1), which threw away
+        // BART's 2nd/3rd real estimates entirely; briefly slice(0,3), lowered to 2 on 2026-09-27 per user
+        // request -- matches the popup's own "up to 2 per direction" rule and lets buildTrainMeta place
+        // more than one real train on the map instead of just the soonest one, without over-fetching.
+        (etd.estimate||[]).slice(0,2).forEach(function(est){
           const lid = COLOR_TO_LINE[(est.color||"").toUpperCase()];
           if(!lid) return;
           rows.push({ lineId:lid, destSid:findDestSid(etd.destination), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes) });
