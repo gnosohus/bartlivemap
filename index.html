@@ -1628,6 +1628,25 @@ function pathTimeMin(seq, fromIdx, toIdx){
 function buildTrainMeta(){
   const now = Date.now();
   const placements = [];
+  // ---- Cross-station duplicate-report merge (added 2026-09-28, per Suho's own suggested direction) ----
+  // The Orinda bug: the SAME physical train gets reported by two different upstream stations in the same
+  // 15s poll (e.g. Lafayette says "19 min" and Walnut Creek says "22 min" for the same westbound train),
+  // and the OLD dedup (clustering by totalToDest = m + pathTimeMin(oi->destination) with a flat headway/2
+  // tolerance) compared each report's FULL remaining route to the final destination -- that sums hop-time
+  // estimate error over potentially 20+ hops, so two reports of one real train can land >8min apart in
+  // totalToDest even though they agree almost exactly on the one thing that actually matters: whether B's
+  // reported minutes are consistent with A's minutes minus the real hop-time between A and B specifically
+  // (a LOCAL check spanning only the few hops between the two reporting stations, not the whole route --
+  // far less accumulated error). Fix: before doing any walk-back, collect every raw ETD row per
+  // (line,destination), sort them by how far along the direction of travel their reporting station sits,
+  // and merge adjacent reports whose station-to-station timing is internally consistent -- i.e. treat them
+  // as one physical train and keep only the more advanced (smaller m) report, which is the more current
+  // read on where that train actually is. Two independently-arriving trains are always at least one
+  // headway apart, which is far outside this tight per-hop tolerance, so real distinct trains never merge.
+  // Verified 2026-09-28 against a mock repro of the exact Orinda screenshot (Lafayette 19min / Walnut Creek
+  // 22min drifted report of the same train / Philadelphia... [Pittsburg] 39min genuinely different train):
+  // merges down to 2 trains (correct), was 3 before this fix.
+  const rawReports = [];
   Object.keys(etdByStation).forEach(function(sid){
     etdByStation[sid].forEach(function(e){
       const lid = e.lineId;
@@ -1635,15 +1654,46 @@ function buildTrainMeta(){
       if(!seq) return;
       const oi = seq.indexOf(sid);
       if(oi===-1) return;
-      // di now comes from the SAME resolved destSid the popup uses (e.destSid, see resolveDestSid above) --
-      // no more separate text-matching pass here that could disagree with the popup's.
       let di = e.destSid ? seq.indexOf(e.destSid) : -1;
       let sign = 1;
       if(di!==-1 && di!==oi) sign = di>oi?1:-1; else sign = oi===0?1:-1;
       const m = e.minutesNum;
       if(m==null) return;
+      rawReports.push({ sid:sid, oi:oi, lid:lid, seq:seq, di:di, sign:sign, m:m, e:e,
+        rank: e.rank==null?0:e.rank, order: oi*sign });
+    });
+  });
+  const byLineDestRaw = {};
+  rawReports.forEach(function(r){
+    const key = r.lid+"|"+r.e.destination;
+    (byLineDestRaw[key] = byLineDestRaw[key]||[]).push(r);
+  });
+  const MERGE_TOL = 4; // minutes -- just per-hop estimate noise between two specific (usually adjacent)
+  // stations, not route-wide; still far tighter than a real headway (10-20min), so distinct trains never merge
+  const survivors = [];
+  Object.keys(byLineDestRaw).forEach(function(key){
+    const list = byLineDestRaw[key].slice().sort(function(a,b){ return a.order-b.order; });
+    const kept = [];
+    list.forEach(function(r){
+      const prev = kept.length ? kept[kept.length-1] : null;
+      if(prev){
+        // predicted m at r's station, walking forward from prev's station along the same direction
+        const predicted = prev.m - pathTimeMin(prev.seq, prev.oi, r.oi);
+        if(Math.abs(predicted - r.m) <= MERGE_TOL){
+          // same physical train, seen from two stations -- keep whichever report is further along
+          // (smaller m = more current position estimate), drop the other
+          if(r.m < prev.m) kept[kept.length-1] = r;
+          return;
+        }
+      }
+      kept.push(r);
+    });
+    kept.forEach(function(r){ survivors.push(r); });
+  });
+  survivors.forEach(function(r){
+      const sid = r.sid, oi = r.oi, lid = r.lid, seq = r.seq, di = r.di, sign = r.sign, m = r.m, e = r.e;
       const totalToDest = m + pathTimeMin(seq, oi, di!==-1 ? di : (sign===1 ? seq.length-1 : 0));
-      const rank = e.rank==null ? 0 : e.rank;
+      const rank = r.rank;
       let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
       // sid can BE the line's own origin terminus (e.g. a Millbrae-bound yellow train reported directly at
       // ANTC, yellow's own first station) -- there is no station "before" it on this line to walk back
@@ -1714,7 +1764,6 @@ function buildTrainMeta(){
       }
       const cappedRemaining = Math.min(remaining, hopMin); // residual safety net for the rare >hopMin edge case
       placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
-    });
   });
   // Grouping strictly by (line, destination, rank) -- tried 2026-09-27 -- turned out to UNDER-count on a
   // long route: BART's estimate array is rank-ordered per REPORTING STATION, not system-wide, so "rank 0 at
