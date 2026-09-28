@@ -1613,6 +1613,7 @@ function pathTimeMin(seq, fromIdx, toIdx){
 }
 function buildTrainMeta(){
   const now = Date.now();
+  const prevMeta = trainMeta || {};
   const placements = [];
   Object.keys(etdByStation).forEach(function(sid){
     etdByStation[sid].forEach(function(e){
@@ -1711,7 +1712,23 @@ function buildTrainMeta(){
       } else if(p.m<clusterRep.m){
         clusterRep = p; // a report closer to arrival is more current -- use its (more accurate) placement
       }
-      meta[key+"|"+clusterIdx] = { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
+      const metaKey = key+"|"+clusterIdx;
+      // buildTrainMeta reruns from scratch every 15s fetch (fetchETD -> buildTrainMeta), and until now it
+      // always wrote a BRAND NEW fetchTime:now + fresh minutesAtFetch here even when this is still the exact
+      // same physical train sitting in the exact same segment it was in last cycle -- tick()'s frac (which
+      // depends on now-fetchTime) got reset toward 0 every single cycle instead of continuing to advance, so
+      // a train that had visibly started moving away from a station snapped back to sitting on it 15s later,
+      // over and over -- looked exactly like a new train "appearing" at the station every refresh instead of
+      // one continuously moving train (reported 2026-09-27: "슥 나오다가 리프레시하면 없어지고 링이 생겨").
+      // Fix: if the previous cycle already had this exact key on this exact segment (prevId/sid unchanged --
+      // i.e. the train hasn't actually reached the next station yet), keep riding that OLD fetchTime instead
+      // of overwriting it, so frac keeps advancing continuously across fetch cycles. Only start a fresh
+      // fetchTime when the segment has genuinely changed (the train moved on) or this is a brand new key.
+      const prev = prevMeta[metaKey];
+      const sameSegment = prev && prev.prevId===clusterRep.prevId && prev.sid===clusterRep.sid;
+      meta[metaKey] = sameSegment
+        ? { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:prev.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:prev.fetchTime }
+        : { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
     });
   });
   const shuttle = buildOakShuttleMeta(now);
