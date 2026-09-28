@@ -1633,28 +1633,22 @@ function buildTrainMeta(){
       let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
       // sid can BE the line's own origin terminus (e.g. a Millbrae-bound yellow train reported directly at
       // ANTC, yellow's own first station) -- there is no station "before" it on this line to walk back
-      // into, so the very first prevIdx is out of range immediately (guard never even runs once). The old
-      // code just `return`ed here, silently dropping every train still sitting at (or just leaving) its own
-      // origin terminus -- confirmed live 2026-09-27: real ANTC/PCTR "SFO/Millbrae" rows were exactly this
-      // case, which is why Millbrae-bound yellow trains showed no map marker even though the popup had the
-      // info (the popup's data doesn't go through this walk-back at all, only the map does). Fixed: when
-      // there's truly no earlier station on this line, just place the train at sid itself (a zero-length
-      // hop) instead of dropping it -- it renders sitting at that station's dot, which is honest given we
-      // have no finer-grained position for a train still at its own origin.
-      // 2026-09-28: this zero-length prevId===sid placement was rendering as a FULL-SIZE train-shaped
-      // gradient stroke sitting exactly on top of the station dot -- indistinguishable from a real moving
-      // train that had frozen mid-track. Confirmed live: BART keeps reporting a small/decreasing "next
-      // departure" countdown for a dwelling train over several consecutive 15s fetches (real layover time
-      // before it turns back), so this same degenerate placement kept regenerating fetch after fetch with
-      // zero visual change -- looked exactly like a stuck bug (reported by user at Berryessa/Daly City/
-      // Millbrae, though it's symmetric and can happen at any of the 6 real line termini, not just those
-      // three -- just a live-data-timing coincidence which ones showed it at the time). Still marking it
-      // dwelling:true instead of dropping the placement (dropping it was the OLDER bug -- see history above
-      // this block -- it made trains sitting at their own origin invisible entirely). tick() now renders a
-      // dwelling train as a small static dot instead of the elongated moving-train stroke, so it reads as
-      // "waiting to depart" rather than "broken train frozen on the tracks".
+      // into, so the very first prevIdx is out of range immediately (guard never even runs once). This is a
+      // train still sitting at (or about to leave) its own origin terminus -- not yet under way.
+      // History: originally just `return`ed here (dropped silently) -- caused Millbrae-bound yellow trains
+      // to show no map marker at all (2026-09-27 fix attempt #1: placed it at sid as a zero-length hop
+      // instead). That zero-length placement then rendered as a FULL-SIZE train-shaped stroke sitting dead
+      // still on top of the station dot for however long BART kept reporting a small/decreasing countdown
+      // (real layover time) -- looked exactly like a frozen/stuck train (2026-09-28 fix attempt #2: kept the
+      // placement but shrank it to a small dot). Still looked like a bug on screen once zoomed in (an extra
+      // colored ring on some termini, changing "randomly" with which lines happened to be dwelling at that
+      // moment) -- user explicitly asked (2026-09-28) to just not show anything at all for a dwelling train,
+      // and only have it appear once it's actually left the platform. Back to dropping the placement, same
+      // as the very first version -- this is now the deliberate final answer, not the old bug: a dwelling
+      // train has genuinely not moved, so there's nothing on the map to draw for it; the departure countdown
+      // is already shown in the station's own popup (renderPopupBody, a separate code path that never went
+      // through this walk-back to begin with).
       if(prevIdx<0 || prevIdx>=seq.length){
-        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[oi], sid:seq[oi], minutesAtFetch:Math.min(m,1), hopMin:1, totalToDest:totalToDest, m:m, dwelling:true });
         return;
       }
       while(prevIdx>=0 && prevIdx<seq.length && guard<40){
@@ -1706,7 +1700,7 @@ function buildTrainMeta(){
       } else if(p.m<clusterRep.m){
         clusterRep = p; // a report closer to arrival is more current -- use its (more accurate) placement
       }
-      meta[key+"|"+clusterIdx] = { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now, dwelling:!!clusterRep.dwelling };
+      meta[key+"|"+clusterIdx] = { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
     });
   });
   const shuttle = buildOakShuttleMeta(now);
@@ -1915,26 +1909,14 @@ function tick(){
     // it at the same thickness/length as a real train (e.g. Red/Yellow) overstates it, since it's really
     // just going straight back and forth between two stations. Scale it down visually (thinner + shorter)
     // so it reads as a shuttle, not a full train.
-    // A "dwelling" placement (m.dwelling, see buildTrainMeta) has prevId===sid -- a train still sitting at
-    // its own line's origin terminus, not yet under way -- so Lprev===Lcur always and there's no real hop
-    // to stretch a trail across. Depending on where that terminus happens to fall in the path's own length
-    // table (length 0 vs length `total`), the old lineLen-based stretch either clamped to a single point by
-    // accident (Lprev===0, tailLen went negative and got clamped back to 0 -- looked fine by luck) or drew a
-    // full-size train-shaped segment sitting dead still at the OTHER terminus (Lprev===total, nothing to
-    // clamp against) -- confirmed live 2026-09-28 at Berryessa/Daly City/Millbrae, reported by user as a
-    // "stuck" train. Force lineLen to ~0 for dwelling placements so it always collapses to a point.
-    // FOLLOW-UP BUG (2026-09-28, also reported live): collapsing to a point isn't enough on its own --
-    // stroke-width still used the FULL train thickness (~1.7x the station dot's own radius), so the
-    // resulting round-cap dot was a solid line-colored circle noticeably BIGGER than, and centered exactly
-    // on, the station's own dot -- looked exactly like an extra colored ring/outline added around some
-    // terminus stations (only the ones with a live dwelling train at that moment, hence "random"-looking).
-    // Shrink stroke-width too for the dwelling case, to well under the plain dot's own radius (st.dotR*inv),
-    // so it reads as a small colored indicator dot sitting inside the station circle, never sticking out
-    // past its edge.
+    // A train still dwelling at its own line's origin terminus (not yet under way) is dropped entirely in
+    // buildTrainMeta now, rather than placed here (tried drawing it two different ways -- a full-size
+    // stroke, then a small dot -- both still read as "a stuck/broken train" once zoomed in on a terminus;
+    // see buildTrainMeta's history comment). So every m reaching this loop is a real in-transit hop, and
+    // Lprev!==Lcur always holds here.
     const isShuttle = m.lineId==="beige";
-    const trainW = m.dwelling ? st.dotR * inv * 0.9
-      : st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
-    const lineLen = m.dwelling ? 0.01 : trainW * (isShuttle ? 1.6 : 2.5);
+    const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
+    const lineLen = trainW * (isShuttle ? 1.6 : 2.5);
     const dir = Lcur>=Lprev ? 1 : -1;
     const headLen = Lprev + frac*(Lcur-Lprev);
     const tailLen = headLen - dir*lineLen;
