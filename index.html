@@ -1704,30 +1704,43 @@ function buildTrainMeta(){
     const lid = key.split("|")[0];
     const tol = (HEADWAY_BY_LINE[lid]||20) * 0.5;
     const list = byLineDest[key].slice().sort(function(a,b){ return a.totalToDest-b.totalToDest; });
-    let clusterRep = null, clusterIdx = 0;
+    const clusters = [];
     list.forEach(function(p){
-      if(!clusterRep || p.totalToDest-clusterRep.totalToDest>tol){
-        clusterIdx++;
-        clusterRep = p;
-      } else if(p.m<clusterRep.m){
-        clusterRep = p; // a report closer to arrival is more current -- use its (more accurate) placement
+      const rep = clusters.length ? clusters[clusters.length-1] : null;
+      if(!rep || p.totalToDest-rep.totalToDest>tol){
+        clusters.push(p);
+      } else if(p.m<rep.m){
+        clusters[clusters.length-1] = p; // a report closer to arrival is more current -- use its placement
       }
-      const metaKey = key+"|"+clusterIdx;
-      // buildTrainMeta reruns from scratch every 15s fetch (fetchETD -> buildTrainMeta), and until now it
-      // always wrote a BRAND NEW fetchTime:now + fresh minutesAtFetch here even when this is still the exact
-      // same physical train sitting in the exact same segment it was in last cycle -- tick()'s frac (which
-      // depends on now-fetchTime) got reset toward 0 every single cycle instead of continuing to advance, so
-      // a train that had visibly started moving away from a station snapped back to sitting on it 15s later,
-      // over and over -- looked exactly like a new train "appearing" at the station every refresh instead of
-      // one continuously moving train (reported 2026-09-27: "슥 나오다가 리프레시하면 없어지고 링이 생겨").
-      // Fix: if the previous cycle already had this exact key on this exact segment (prevId/sid unchanged --
-      // i.e. the train hasn't actually reached the next station yet), keep riding that OLD fetchTime instead
-      // of overwriting it, so frac keeps advancing continuously across fetch cycles. Only start a fresh
-      // fetchTime when the segment has genuinely changed (the train moved on) or this is a brand new key.
-      const prev = prevMeta[metaKey];
-      const sameSegment = prev && prev.prevId===clusterRep.prevId && prev.sid===clusterRep.sid;
-      meta[metaKey] = sameSegment
-        ? { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:prev.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:prev.fetchTime }
+    });
+    // buildTrainMeta reruns from scratch every 15s fetch, and used to always write a BRAND NEW fetchTime:now
+    // here even when this is still the exact same physical train sitting in the exact same segment it was in
+    // last cycle -- tick()'s frac (now-fetchTime) got reset toward 0 every cycle instead of continuing to
+    // advance, so a train that had visibly started moving snapped back to sitting on its station 15s later,
+    // over and over (reported 2026-09-27: "슥 나오다가 리프레시하면 없어지고 링이 생겨"). First attempt at a fix
+    // matched the previous cycle's entry by its numeric key suffix (key+"|"+clusterIdx) -- but that suffix is
+    // just this cycle's position in a freshly re-sorted-by-totalToDest list, and BART's own estimates shift
+    // by a minute or reorder often enough between two 15s fetches that the SAME physical train frequently
+    // gets a DIFFERENT clusterIdx next cycle -- so the lookup missed almost every time on real data and the
+    // fix did essentially nothing (reported 2026-09-27: "전혀 달라진게 없어"). Fixed properly: match against
+    // the PREVIOUS cycle's entries for this same lineId+destination by actual content (same prevId+sid
+    // segment), not by position, so a train keeps its identity across fetches regardless of what number it
+    // happens to sort into this time.
+    const oldCandidates = Object.keys(prevMeta)
+      .filter(function(k){ return k.indexOf(key+"|")===0; })
+      .map(function(k){ return prevMeta[k]; });
+    const usedOld = [];
+    clusters.forEach(function(clusterRep, i){
+      const metaKey = key+"|"+(i+1);
+      let match = null;
+      for(let j=0;j<oldCandidates.length;j++){
+        const c = oldCandidates[j];
+        if(usedOld.indexOf(c)!==-1) continue;
+        if(c.prevId===clusterRep.prevId && c.sid===clusterRep.sid){ match = c; break; }
+      }
+      if(match) usedOld.push(match);
+      meta[metaKey] = match
+        ? { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:match.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:match.fetchTime }
         : { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
     });
   });
