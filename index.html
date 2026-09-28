@@ -136,20 +136,9 @@
   <div id="mapWrap">
     <svg id="map" viewBox="-60 -80 1240 1340" preserveAspectRatio="xMidYMid meet">
       <g id="lines"></g>
+      <g id="trains"></g>
       <g id="stations"></g>
       <g id="stationLabels"></g>
-      <!-- trains draws AFTER stations/labels (not right after lines) so a train sitting at or near a
-           station's own position paints ON TOP of that station's dot instead of being fully hidden under
-           it. SVG paints in document order, later = on top, and the group order used to be
-           lines,trains,stations,... -- so any train close to frac=0 (sitting right at a station, which
-           happens often: see buildTrainMeta's walk-back comments on BART's whole-minute data granularity)
-           was completely covered by the station's own opaque white dot, drawn right afterward. Confirmed
-           directly against the live DOM 2026-09-27: valid, correctly-colored, non-degenerate train <path>
-           elements existed with the right coordinates and full opacity, yet were invisible on screen --
-           this reordering, not another data/animation fix, is what actually makes them visible (report:
-           "링만 보이고 열차가 안 보인다" -- the "ring" was always just the station's own dot; the train was
-           real, it was just painted underneath it). -->
-      <g id="trains"></g>
       <g id="hitTargets"></g>
     </svg>
   </div>
@@ -595,8 +584,18 @@ function lightenHex(hex, amt){
 // the gradient vector to the train's real tail→head points fixes this at any orientation.
 const trainDefs = el("defs", {});
 document.getElementById("map").insertBefore(trainDefs, document.getElementById("map").firstChild);
+// trainMeta keys are built from BART's own raw destination text (e.g. "blue|Daly City|1") so they can, and
+// often do, contain spaces (and other punctuation) -- Dublin/Pleasanton happens not to have one, which is
+// exactly why THAT direction always looked fine while Daly-City-bound (and other space-containing
+// destinations elsewhere) silently never rendered: an unquoted CSS url(#...) reference is invalid the
+// moment its fragment contains a literal space, so stroke="url(#trainGrad-blue|Daly City|1)" fails to parse
+// entirely and the browser falls back to stroke:none -- a fully computed, correctly-positioned train with
+// an invisible stroke. Confirmed directly (2026-09-28) with local synthetic ETD data, no live API involved:
+// getComputedStyle on that exact path element read stroke:"none" while a space-free key on the same line
+// rendered its gradient normally. Fix: never put the raw key straight into an id/url() -- sanitize it first.
+function sanitizeIdPart(key){ return key.replace(/[^a-zA-Z0-9_-]/g, "_"); }
 function makeTrainGradient(key, color){
-  const grad = el("linearGradient", { id:"trainGrad-"+key, gradientUnits:"userSpaceOnUse", x1:"0", y1:"0", x2:"1", y2:"0" });
+  const grad = el("linearGradient", { id:"trainGrad-"+sanitizeIdPart(key), gradientUnits:"userSpaceOnUse", x1:"0", y1:"0", x2:"1", y2:"0" });
   grad.appendChild(el("stop", { offset:"0%", "stop-color":color, "stop-opacity":"0.30" }));
   grad.appendChild(el("stop", { offset:"100%", "stop-color":color, "stop-opacity":"1.0" }));
   trainDefs.appendChild(grad);
@@ -1977,8 +1976,27 @@ function tick(){
     const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
     const lineLen = trainW * (isShuttle ? 1.6 : 2.5);
     const dir = Lcur>=Lprev ? 1 : -1;
-    const headLen = Lprev + frac*(Lcur-Lprev);
-    const tailLen = headLen - dir*lineLen;
+    let headLen = Lprev + frac*(Lcur-Lprev);
+    let tailLen = headLen - dir*lineLen;
+    // RING/HALO BUG (found + fixed 2026-09-28, verified locally with synthetic ETD data, no live API
+    // involved): near a station that sits right at the START or END of the whole line's own path (i.e. a
+    // line's own terminus -- Dublin, Antioch, Richmond, Berryessa, Millbrae/SFO, Daly City for Green, etc.),
+    // tailLen/headLen can fall outside [0,total] -- and the sampling loop below used to clamp EACH SAMPLED
+    // POINT independently (Math.max(0,Math.min(total,...))), which collapses every out-of-range sample onto
+    // the same single boundary point (L=0 or L=total) instead of shifting the whole window. A frac==0 hop
+    // (very common: see buildTrainMeta's cappedRemaining safety net, triggered constantly by BART's
+    // whole-minute data granularity) that also happens to sit at a line terminus therefore drew as ALL 11
+    // samples on top of one point -- and since `.train{ stroke-linecap:round }`, a zero-length round-capped
+    // stroke renders as a solid filled circle of diameter = the train's own stroke-width, sitting exactly on
+    // the terminus station's own dot. That circle IS the reported "ring" -- not a leftover dwelling-train
+    // placement (those are already dropped entirely, see buildTrainMeta), and not a z-order/paint-order
+    // issue either (confirmed: it reproduces identically regardless of group paint order, since the shape
+    // itself, not what's drawn over what, is the bug). Fix: keep the segment's real length and slide the
+    // whole [tailLen,headLen] window inward when it runs past the path's own boundary, instead of clamping
+    // each endpoint separately.
+    const winLo = Math.min(headLen, tailLen), winHi = Math.max(headLen, tailLen);
+    if(winLo<0){ headLen -= winLo; tailLen -= winLo; }
+    else if(winHi>total){ const over = winHi-total; headLen -= over; tailLen -= over; }
     const SAMPLES = 10;
     let d = "", tailP = null, headP = null;
     for(let i=0;i<=SAMPLES;i++){
@@ -1992,7 +2010,7 @@ function tick(){
     let rec = trainMarkers[key];
     if(!rec){
       const grad = makeTrainGradient(key, LINES[m.lineId].color);
-      const path = el("path", { class:"train", fill:"none", stroke:"url(#trainGrad-"+key+")" });
+      const path = el("path", { class:"train", fill:"none", stroke:"url(#trainGrad-"+sanitizeIdPart(key)+")" });
       trainsG.appendChild(path);
       rec = trainMarkers[key] = { el:path, grad:grad, lineId:m.lineId, expiring:null };
     }
