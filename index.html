@@ -1662,6 +1662,7 @@ function buildTrainMeta(){
       if(prevIdx<0 || prevIdx>=seq.length){
         return;
       }
+      let brokeAtLineBoundary = false;
       while(prevIdx>=0 && prevIdx<seq.length && guard<40){
         guard++;
         hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[prevIdx]], STATIONS[seq[curIdx]])/0.9));
@@ -1683,12 +1684,31 @@ function buildTrainMeta(){
         // frac then starts as a smooth, small-but-nonzero fraction that reflects m at that instant, the same
         // whether it's freshly loaded or mid-session, instead of being biased to the segment's start every
         // single time.
-        if(remaining<=hopMin*1.05 || nextPrevIdx<0 || nextPrevIdx>=seq.length) break;
+        if(remaining<=hopMin*1.05){ break; }
+        if(nextPrevIdx<0 || nextPrevIdx>=seq.length){ brokeAtLineBoundary = true; break; }
         remaining -= hopMin;
         curIdx = prevIdx;
         prevIdx = nextPrevIdx;
       }
       if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
+      // PENDING-DEPARTURE CASE (found 2026-09-28 from a real screenshot: West Dublin simultaneously
+      // reporting a genuine 2-min AND a genuine 22-min westbound train). This hop is the line's very own
+      // FIRST hop out of its terminus -- there's no earlier station to walk back into, so the loop above is
+      // forced to stop here (brokeAtLineBoundary) even when `remaining` is still much bigger than this hop's
+      // own travel time (hopMin). That leftover (`excess`) isn't travel time on this block -- it's time the
+      // train hasn't even left the terminus platform yet, since BART's "minutes to arrival at the first
+      // stop" bakes in however long it's still waiting to depart. Previously this got the same treatment as
+      // a genuinely-in-progress hop (capped to hopMin, drawn immediately at frac=0) -- so a real 22-min-out
+      // train and a real 2-min-out train both got forced onto the identical Dublin->West Dublin segment and
+      // rendered stacked on top of each other, looking like two trains leaving the terminus at once. Fix:
+      // don't draw it yet -- schedule its departure for `excess` minutes from now (departAt) and have
+      // tick() skip it entirely until that real moment arrives; once it does, it animates the hop from a
+      // clean, fresh frac=0, same as any train that's actually just departed.
+      const excess = remaining - hopMin;
+      if(brokeAtLineBoundary && excess > hopMin*0.05){
+        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:hopMin, hopMin:hopMin, totalToDest:totalToDest, m:m, departAt: now + excess*60000 });
+        return;
+      }
       const cappedRemaining = Math.min(remaining, hopMin); // residual safety net for the rare >hopMin edge case
       placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
     });
@@ -1756,9 +1776,12 @@ function buildTrainMeta(){
         if(c.prevId===clusterRep.prevId && c.sid===clusterRep.sid){ match = c; break; }
       }
       if(match) usedOld.push(match);
+      // departAt (pending-departure marker, see the walk-back's "PENDING-DEPARTURE CASE" above) carries
+      // forward the same way minutesAtFetch/fetchTime do -- once matched across cycles, keep the FIRST
+      // computed departure estimate stable rather than letting it jitter with every fresh 15s poll.
       meta[metaKey] = match
-        ? { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:match.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:match.fetchTime }
-        : { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now };
+        ? { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:match.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:match.fetchTime, departAt:match.departAt }
+        : { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now, departAt:clusterRep.departAt };
     });
   });
   const shuttle = buildOakShuttleMeta(now);
@@ -1945,6 +1968,10 @@ function tick(){
   const activeKeys = {};
   Object.keys(trainMeta).forEach(function(key){
     const m = trainMeta[key];
+    // Pending-departure placement (see buildTrainMeta) -- not actually en route yet, so draw nothing at all
+    // until its real departAt moment arrives. Left out of activeKeys too: no marker exists for it yet, so
+    // there's nothing for the expiry/fade-out loop below to worry about.
+    if(m.departAt && now<m.departAt){ return; }
     activeKeys[key]=true;
     const lineEl = linePathEls[m.lineId][0];
     const total = pathLenAt[m.lineId].total;
