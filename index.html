@@ -1661,7 +1661,18 @@ function buildTrainMeta(){
         prevIdx = nextPrevIdx;
       }
       if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
-      placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:remaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
+      // The walk-back above deliberately allows up to 1.4x hopMin of slack when picking WHICH segment the
+      // train is currently in (a tight exact match mis-picks the segment when the haversine/0.9 hop-time
+      // estimate is a little off) -- but passing that slack straight through into minutesAtFetch broke the
+      // RENDERING: tick()'s frac = clamp(0,1, 1-curMin/hopMin) is fully clamped to 0 for as long as
+      // curMin>hopMin, so the train's head sat pinned exactly on the segment's start station -- overlapping
+      // its dot with a solid colored circle -- for however much of that slack (up to 40% of one hop) real
+      // time hadn't yet burned through, even though the train had genuinely already departed. Confirmed as
+      // a real bug 2026-09-27 (report: a colored ring sitting on a station, overlapping its dot, even as
+      // that line's train was actively departing). Fix: cap what's actually stored to hopMin itself -- the
+      // slack above only ever picks the right segment, it never inflates the position within it.
+      const cappedRemaining = Math.min(remaining, hopMin);
+      placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
     });
   });
   // Grouping strictly by (line, destination, rank) -- tried 2026-09-27 -- turned out to UNDER-count on a
