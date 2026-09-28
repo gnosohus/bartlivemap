@@ -1922,11 +1922,18 @@ function tick(){
     // accident (Lprev===0, tailLen went negative and got clamped back to 0 -- looked fine by luck) or drew a
     // full-size train-shaped segment sitting dead still at the OTHER terminus (Lprev===total, nothing to
     // clamp against) -- confirmed live 2026-09-28 at Berryessa/Daly City/Millbrae, reported by user as a
-    // "stuck" train. Force lineLen to ~0 for dwelling placements so it always collapses to the same small
-    // round dot (round line-cap on .train already makes a zero-length stroke render as a circle) regardless
-    // of which end of the path table it lands on -- reads as "waiting to depart", not a frozen moving train.
+    // "stuck" train. Force lineLen to ~0 for dwelling placements so it always collapses to a point.
+    // FOLLOW-UP BUG (2026-09-28, also reported live): collapsing to a point isn't enough on its own --
+    // stroke-width still used the FULL train thickness (~1.7x the station dot's own radius), so the
+    // resulting round-cap dot was a solid line-colored circle noticeably BIGGER than, and centered exactly
+    // on, the station's own dot -- looked exactly like an extra colored ring/outline added around some
+    // terminus stations (only the ones with a live dwelling train at that moment, hence "random"-looking).
+    // Shrink stroke-width too for the dwelling case, to well under the plain dot's own radius (st.dotR*inv),
+    // so it reads as a small colored indicator dot sitting inside the station circle, never sticking out
+    // past its edge.
     const isShuttle = m.lineId==="beige";
-    const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
+    const trainW = m.dwelling ? st.dotR * inv * 0.9
+      : st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
     const lineLen = m.dwelling ? 0.01 : trainW * (isShuttle ? 1.6 : 2.5);
     const dir = Lcur>=Lprev ? 1 : -1;
     const headLen = Lprev + frac*(Lcur-Lprev);
