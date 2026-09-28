@@ -1976,27 +1976,18 @@ function tick(){
     const trainW = st.dotR * inv * 1.7 * 2 * Math.min(1, view.scale/4) * (isShuttle ? 0.55 : 1);
     const lineLen = trainW * (isShuttle ? 1.6 : 2.5);
     const dir = Lcur>=Lprev ? 1 : -1;
-    let headLen = Lprev + frac*(Lcur-Lprev);
+    // headLen is the train's actual, continuously-advancing position (from frac) -- it must NEVER be
+    // adjusted, or the train visibly stops moving (regression found 2026-09-28: an earlier attempt here
+    // slid BOTH head and tail inward together near a line terminus, which pinned headLen at a fixed offset
+    // for the whole frac range until headLen exceeded the train's own length -- exactly the "frozen at the
+    // terminus, never departs" look that came back). Only the TAIL (the fading trail behind the head, purely
+    // cosmetic) gets clamped toward headLen so it can't extend past the path's own start/end -- this just
+    // shortens the visible trail right after a terminus departure (physically correct: a train that just
+    // left has a short trail) instead of collapsing to a static point (the original "ring") or freezing (the
+    // regression above).
+    const headLen = Lprev + frac*(Lcur-Lprev);
     let tailLen = headLen - dir*lineLen;
-    // RING/HALO BUG (found + fixed 2026-09-28, verified locally with synthetic ETD data, no live API
-    // involved): near a station that sits right at the START or END of the whole line's own path (i.e. a
-    // line's own terminus -- Dublin, Antioch, Richmond, Berryessa, Millbrae/SFO, Daly City for Green, etc.),
-    // tailLen/headLen can fall outside [0,total] -- and the sampling loop below used to clamp EACH SAMPLED
-    // POINT independently (Math.max(0,Math.min(total,...))), which collapses every out-of-range sample onto
-    // the same single boundary point (L=0 or L=total) instead of shifting the whole window. A frac==0 hop
-    // (very common: see buildTrainMeta's cappedRemaining safety net, triggered constantly by BART's
-    // whole-minute data granularity) that also happens to sit at a line terminus therefore drew as ALL 11
-    // samples on top of one point -- and since `.train{ stroke-linecap:round }`, a zero-length round-capped
-    // stroke renders as a solid filled circle of diameter = the train's own stroke-width, sitting exactly on
-    // the terminus station's own dot. That circle IS the reported "ring" -- not a leftover dwelling-train
-    // placement (those are already dropped entirely, see buildTrainMeta), and not a z-order/paint-order
-    // issue either (confirmed: it reproduces identically regardless of group paint order, since the shape
-    // itself, not what's drawn over what, is the bug). Fix: keep the segment's real length and slide the
-    // whole [tailLen,headLen] window inward when it runs past the path's own boundary, instead of clamping
-    // each endpoint separately.
-    const winLo = Math.min(headLen, tailLen), winHi = Math.max(headLen, tailLen);
-    if(winLo<0){ headLen -= winLo; tailLen -= winLo; }
-    else if(winHi>total){ const over = winHi-total; headLen -= over; tailLen -= over; }
+    tailLen = dir>0 ? Math.max(0, tailLen) : Math.min(total, tailLen);
     const SAMPLES = 10;
     let d = "", tailP = null, headP = null;
     for(let i=0;i<=SAMPLES;i++){
