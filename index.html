@@ -1581,6 +1581,10 @@ function findDestSid(destText){
 }
 
 let trainMeta = {};
+// Persistent cross-cycle train identity table (2026-09-28) -- survives every buildTrainMeta() call, unlike
+// trainMeta itself which gets fully rebuilt each time. See its use in the clustering section below for why.
+let trackedTrains = {};
+let trackedTrainSeq = 0;
 // BART's own ETD minutes is "time until arrival AT sid" -- for a train more than one hop out (common once
 // fetchETD keeps all of BART's real estimates, not just the soonest), the old version only ever checked the
 // single immediately-adjacent hop and silently dropped anything farther, which is why a station could show
@@ -1623,7 +1627,6 @@ function pathTimeMin(seq, fromIdx, toIdx){
 }
 function buildTrainMeta(){
   const now = Date.now();
-  const prevMeta = trainMeta || {};
   const placements = [];
   Object.keys(etdByStation).forEach(function(sid){
     etdByStation[sid].forEach(function(e){
@@ -1736,7 +1739,31 @@ function buildTrainMeta(){
     const key = p.lineId+"|"+p.destination;
     (byLineDest[key] = byLineDest[key]||[]).push(p);
   });
-  const meta = {};
+  // DUPLICATE-TRAIN BUG (found 2026-09-28 from a real screenshot: Orinda reporting genuine 19-min and
+  // 39-min westbound trains, but the map showed what looked like the SAME train twice, back-to-back near
+  // Orinda). Root cause: BART reports one physical train's ETA independently at EVERY station along its
+  // approach, so the exact same train can produce two `placements` here (one walked back from Orinda's own
+  // report, one from Lafayette's or Walnut Creek's). The single-snapshot clustering below (totalToDest
+  // within half a headway) is only meant to catch that -- but each station's walk-back accumulates its own
+  // haversine-distance hop-time error over however many hops it is from the train, so two INDEPENDENT
+  // reports of the same train can drift apart by more than that tolerance on a long multi-hop route, and
+  // get counted as two different trains.
+  // FIX: keep a PERSISTENT, cross-cycle `trackedTrains` table (module-level, survives every 15s
+  // buildTrainMeta() call) instead of only ever comparing THIS cycle's reports against each other. Each
+  // tracked train predicts its own current totalToDest by simply counting down real elapsed time since its
+  // last confirmed update (`tt.totalToDest - elapsedMinutes` -- totalToDest is already "minutes remaining",
+  // so it should tick down 1:1 with the clock if nothing has changed). A fresh report is matched to whichever
+  // tracked train's PREDICTION it lands closest to, using a much TIGHTER tolerance (3 min) than the raw
+  // cross-station snapshot comparison -- tight is safe here because we're checking a real prediction against
+  // an observation, not two independently-derived one-shot estimates. This is exactly what a station "seeing
+  // a train pass" gives us for free: once real elapsed time confirms a train should have moved on, only a
+  // report consistent with that continued progress gets accepted as the same train; a second, spurious report
+  // of a train that's actually still further out won't match anything's prediction and correctly starts its
+  // own tracked entry instead of merging into (or duplicating next to) an unrelated one. A train that stops
+  // being reported at all (arrived) is dropped after a short grace window below, not instantly, so one missed
+  // poll doesn't flicker it away and reappear under a new id.
+  const TRACK_TOL = 3; // minutes
+  const touchedIds = {};
   Object.keys(byLineDest).forEach(function(key){
     const lid = key.split("|")[0];
     const tol = (HEADWAY_BY_LINE[lid]||20) * 0.5;
@@ -1745,45 +1772,44 @@ function buildTrainMeta(){
     list.forEach(function(p){
       const rep = clusters.length ? clusters[clusters.length-1] : null;
       if(!rep || p.totalToDest-rep.totalToDest>tol){
-        clusters.push(p);
+        clusters.push(p); // still useful for collapsing same-INSTANT duplicate reports before tracking runs
       } else if(p.m<rep.m){
         clusters[clusters.length-1] = p; // a report closer to arrival is more current -- use its placement
       }
     });
-    // buildTrainMeta reruns from scratch every 15s fetch, and used to always write a BRAND NEW fetchTime:now
-    // here even when this is still the exact same physical train sitting in the exact same segment it was in
-    // last cycle -- tick()'s frac (now-fetchTime) got reset toward 0 every cycle instead of continuing to
-    // advance, so a train that had visibly started moving snapped back to sitting on its station 15s later,
-    // over and over (reported 2026-09-27: "슥 나오다가 리프레시하면 없어지고 링이 생겨"). First attempt at a fix
-    // matched the previous cycle's entry by its numeric key suffix (key+"|"+clusterIdx) -- but that suffix is
-    // just this cycle's position in a freshly re-sorted-by-totalToDest list, and BART's own estimates shift
-    // by a minute or reorder often enough between two 15s fetches that the SAME physical train frequently
-    // gets a DIFFERENT clusterIdx next cycle -- so the lookup missed almost every time on real data and the
-    // fix did essentially nothing (reported 2026-09-27: "전혀 달라진게 없어"). Fixed properly: match against
-    // the PREVIOUS cycle's entries for this same lineId+destination by actual content (same prevId+sid
-    // segment), not by position, so a train keeps its identity across fetches regardless of what number it
-    // happens to sort into this time.
-    const oldCandidates = Object.keys(prevMeta)
-      .filter(function(k){ return k.indexOf(key+"|")===0; })
-      .map(function(k){ return prevMeta[k]; });
-    const usedOld = [];
-    clusters.forEach(function(clusterRep, i){
-      const metaKey = key+"|"+(i+1);
-      let match = null;
-      for(let j=0;j<oldCandidates.length;j++){
-        const c = oldCandidates[j];
-        if(usedOld.indexOf(c)!==-1) continue;
-        if(c.prevId===clusterRep.prevId && c.sid===clusterRep.sid){ match = c; break; }
-      }
-      if(match) usedOld.push(match);
-      // departAt (pending-departure marker, see the walk-back's "PENDING-DEPARTURE CASE" above) carries
-      // forward the same way minutesAtFetch/fetchTime do -- once matched across cycles, keep the FIRST
-      // computed departure estimate stable rather than letting it jitter with every fresh 15s poll.
-      meta[metaKey] = match
-        ? { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:match.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:match.fetchTime, departAt:match.departAt }
-        : { lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, minutesAtFetch:clusterRep.minutesAtFetch, hopMin:clusterRep.hopMin, fetchTime:now, departAt:clusterRep.departAt };
+    const existingIds = Object.keys(trackedTrains).filter(function(id){ return trackedTrains[id].key===key; });
+    const usedIds = [];
+    clusters.forEach(function(clusterRep){
+      let bestId = null, bestDiff = Infinity;
+      existingIds.forEach(function(id){
+        if(usedIds.indexOf(id)!==-1) return;
+        const tt = trackedTrains[id];
+        const predicted = tt.totalToDest - (now-tt.updateTime)/60000;
+        const diff = Math.abs(clusterRep.totalToDest-predicted);
+        if(diff<bestDiff){ bestDiff=diff; bestId=id; }
+      });
+      const old = (bestId!==null && bestDiff<=TRACK_TOL) ? trackedTrains[bestId] : null;
+      const id = old ? bestId : (key+"#"+(++trackedTrainSeq));
+      if(old) usedIds.push(bestId);
+      touchedIds[id] = true;
+      trackedTrains[id] = {
+        key:key, lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, hopMin:clusterRep.hopMin,
+        totalToDest:clusterRep.totalToDest, updateTime:now,
+        minutesAtFetch: old ? old.minutesAtFetch : clusterRep.minutesAtFetch,
+        fetchTime: old ? old.fetchTime : now,
+        departAt: old ? old.departAt : clusterRep.departAt
+      };
     });
   });
+  // Grace window: a tracked train not confirmed by any report THIS cycle stays around for up to ~45s
+  // (3 missed polls) before being dropped, so one noisy/missing poll doesn't delete-and-recreate it under a
+  // new id (which would just reintroduce the old reset-to-frac-0 flicker this whole mechanism exists to
+  // avoid). Past that, it's gone for good -- assume arrived/exited.
+  Object.keys(trackedTrains).forEach(function(id){
+    if(!touchedIds[id] && now-trackedTrains[id].updateTime>45000){ delete trackedTrains[id]; }
+  });
+  const meta = {};
+  Object.keys(trackedTrains).forEach(function(id){ meta[id] = trackedTrains[id]; });
   const shuttle = buildOakShuttleMeta(now);
   if(shuttle) meta["beige|shuttle"] = shuttle;
   trainMeta = meta;
