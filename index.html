@@ -64,25 +64,7 @@
   }
   #searchIconBtn.hidden{ display:none; }
 
-  /* Alerts panel — mirrors the search icon/panel pattern, anchored right */
-  #alertsIconBtn{
-    position:absolute; top:14px; right:14px; z-index:6; width:40px; height:40px; border-radius:50%;
-    border:none; background:var(--card); color:var(--ink); box-shadow:var(--shadow); cursor:pointer;
-    display:flex; align-items:center; justify-content:center; touch-action:manipulation;
-  }
-  #alertsIconBtn.hidden{ display:none; }
-  #alertsPanel{
-    position:absolute; top:14px; right:14px; z-index:7; width:min(420px, calc(100vw - 28px)); display:none;
-    background:var(--card); border-radius:16px; box-shadow:var(--shadow); padding:14px 16px;
-    max-height:70vh; overflow:auto;
-  }
-  #alertsPanel.open{ display:block; }
-  #alertsPanel .pclose{position:absolute; top:10px; right:12px; cursor:pointer; color:var(--muted); font-size:16px; background:none; border:none;}
-  #alertsPanel h3{ margin:0 0 10px; font-size:14px; }
-  #alertsPanel .item{ display:flex; gap:8px; padding:8px 0; border-top:1px solid #f2f0e8; font-size:12.5px; line-height:1.4; }
-  #alertsPanel .item:first-of-type{ border-top:none; }
-  #alertsPanel .item .ic{ flex:0 0 auto; }
-  #alertsPanel .empty{ color:var(--muted); font-size:12.5px; }
+  /* Top-right alerts bell/panel CSS removed 2026-09-28 (button + panel removed, see markup above) */
   #popup .alert-row{ display:flex; gap:8px; align-items:flex-start; background:#fdeaea; color:var(--ink);
     border-radius:10px; padding:8px 10px; font-size:12px; line-height:1.4; margin-bottom:10px; }
   #searchWrap{ position:absolute; top:14px; left:14px; z-index:7; width:min(420px, calc(100vw - 28px)); display:none; }
@@ -153,12 +135,10 @@
     <div id="searchResults"></div>
   </div>
 
-  <button id="alertsIconBtn" title="Alerts" aria-label="Alerts">
-    <!-- BELL (previous, for easy revert): width/height 19, stroke-width 2.18, path="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" + path="M13.73 21a2 2 0 0 1-3.46 0" -->
-    <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.97" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.5 2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.5a1.6 1.6 0 0 0-2.8 0Z"></path><line x1="12" y1="9.5" x2="12" y2="13.2"></line><circle cx="12" cy="16" r="0.15" fill="currentColor"></circle></svg>
-  </button>
-  <div id="alertsPanel"><button class="pclose" id="alertsPanelClose">×</button><h3>Alerts</h3><div id="alertsList"></div></div>
-
+  <!-- Top-right alerts bell + panel removed 2026-09-28 per user request: showing alert info twice (a
+  global button/panel AND the per-station popup) was redundant -- alerts now surface ONLY inline in each
+  affected station's own popup (see renderPopupBody / alertsForStation). computeLiveAlerts()/DEMO_ALERTS/
+  scheduleClosures are unchanged and still feed that popup path. -->
 
   <button id="refreshBtn" title="Refresh live data" aria-label="Refresh live data">
     <!-- v38: switched to the double-arrow "sync" glyph (option C) at 16px, was the single clockwise
@@ -1152,7 +1132,6 @@ const searchResults = document.getElementById("searchResults");
 const searchWrap = document.getElementById("searchWrap");
 const searchIconBtn = document.getElementById("searchIconBtn");
 function openSearch(){
-  closeAlerts();
   searchWrap.classList.add("open");
   searchIconBtn.classList.add("hidden");
   searchInput.focus();
@@ -1216,7 +1195,10 @@ const SCHEDULE_RULES = {
     // roughly BART's published AM/PM commute windows; used only to decide which message to show, not to
     // hide/show trains -- live data always wins if trains actually appear outside these hours.
     startHour: 5, endHour: 21,
-    note: "Green Line runs on weekdays during commute hours only — no weekend or evening service."
+    // Line name is no longer baked into this sentence (2026-09-28) -- the popup now always prepends a
+    // bolded "<Line> Line" label of its own (see renderPopupBody), the same way for every alert type, so
+    // embedding it here too would have doubled it up ("Green Line: Green Line runs on weekdays...").
+    note: "Runs on weekdays during commute hours only — no weekend or evening service."
   }
 };
 function scheduleNote(lid){
@@ -1266,32 +1248,10 @@ function alertsForStation(sid){
   });
   return fromActive.concat(fromSchedule);
 }
-function renderAlertsPanel(){
-  const list = document.getElementById("alertsList");
-  const alerts = activeAlerts();
-  list.innerHTML = alerts.length ? alerts.map(function(a){
-    // For a line-scope alert, lead with a colored dot in the line's own color plus its plain color name
-    // only (e.g. "Green Line") -- previously this appended the route name in parens ("Green Line
-    // (Berryessa - Daly City)"), which read like the alert itself was titled "Berryessa and Daly City" --
-    // confusing as a section header. Fixed 2026-09-27 per user report: just the color name identifies which
-    // line on the map this is about, nothing more is needed in the header.
-    const lineChip = a.scope==="line" ? '<span class="chip" style="background:'+LINES[a.lineId].color+';display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;"></span>' : '';
-    const scopeLabel = a.scope==="line" ? (a.lineId.charAt(0).toUpperCase()+a.lineId.slice(1)+" Line")
-      : (a.scope==="station" ? STATIONS[a.stationId].name : "Systemwide");
-    return '<div class="item"><span class="ic">'+alertIcon(a.type)+'</span><div><strong>'+lineChip+scopeLabel+'</strong><br>'+a.text+'</div></div>';
-  }).join("") : '<div class="empty">No active alerts.</div>';
-  alertsIconBtn.classList.toggle("hidden", !alerts.length);
-}
-const alertsIconBtn = document.getElementById("alertsIconBtn");
-const alertsPanel = document.getElementById("alertsPanel");
-function openAlerts(){ closeSearch(); alertsPanel.classList.add("open"); alertsIconBtn.classList.add("hidden"); }
-function closeAlerts(){ alertsPanel.classList.remove("open"); if(activeAlerts().length) alertsIconBtn.classList.remove("hidden"); }
-alertsIconBtn.addEventListener("click", function(e){ e.stopPropagation(); openAlerts(); });
-document.getElementById("alertsPanelClose").addEventListener("click", function(e){ e.stopPropagation(); closeAlerts(); });
-document.getElementById("app").addEventListener("click", function(e){
-  if(!alertsPanel.contains(e.target) && e.target!==alertsIconBtn && !alertsIconBtn.contains(e.target)){ closeAlerts(); }
-});
-renderAlertsPanel();
+// Top-right alerts bell/panel (renderAlertsPanel/openAlerts/closeAlerts) removed 2026-09-28 per user
+// request -- alerts now surface only inline per-station via alertsForStation()/renderPopupBody, using
+// activeAlerts()/scheduleClosures exactly as before. computeLiveAlerts() (called from the fetch cycle,
+// see below) still needs to run every cycle to keep that data current even with no panel to redraw.
 
 /* ============================= SOLO LINE / SHOW ALL ============================= */
 
@@ -1393,8 +1353,12 @@ function oakScheduleText(){
 }
 function renderPopupBody(sid){
   const st = STATIONS[sid];
+  // Every alert row leads with a bolded "<Line> Line" label (2026-09-28, per user request) -- same
+  // treatment for a schedule closure (e.g. Green) and a live-data anomaly (any line), so it's always clear
+  // at a glance which line the alert is about, not just for the ones whose own sentence happened to name it.
   const alertHtml = alertsForStation(sid).map(function(a){
-    return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+a.text+'</span></div>';
+    const lineLabel = a.scope==="line" ? '<b>'+a.lineId.charAt(0).toUpperCase()+a.lineId.slice(1)+' Line</b>: ' : '';
+    return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+lineLabel+a.text+'</span></div>';
   }).join("");
   const rows = etdByStation[sid]||[];
   // Formatted as a normal destination row (swatch + dest + gray min-style field), matching every other
@@ -1930,7 +1894,6 @@ async function fetchETD(){
     simulateTrainMeta();
   }
   computeLiveAlerts();
-  renderAlertsPanel();
   setStatus(liveMode);
   if(focusedStation) renderPopupBody(focusedStation);
 }
