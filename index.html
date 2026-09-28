@@ -136,9 +136,20 @@
   <div id="mapWrap">
     <svg id="map" viewBox="-60 -80 1240 1340" preserveAspectRatio="xMidYMid meet">
       <g id="lines"></g>
-      <g id="trains"></g>
       <g id="stations"></g>
       <g id="stationLabels"></g>
+      <!-- trains draws AFTER stations/labels (not right after lines) so a train sitting at or near a
+           station's own position paints ON TOP of that station's dot instead of being fully hidden under
+           it. SVG paints in document order, later = on top, and the group order used to be
+           lines,trains,stations,... -- so any train close to frac=0 (sitting right at a station, which
+           happens often: see buildTrainMeta's walk-back comments on BART's whole-minute data granularity)
+           was completely covered by the station's own opaque white dot, drawn right afterward. Confirmed
+           directly against the live DOM 2026-09-27: valid, correctly-colored, non-degenerate train <path>
+           elements existed with the right coordinates and full opacity, yet were invisible on screen --
+           this reordering, not another data/animation fix, is what actually makes them visible (report:
+           "링만 보이고 열차가 안 보인다" -- the "ring" was always just the station's own dot; the train was
+           real, it was just painted underneath it). -->
+      <g id="trains"></g>
       <g id="hitTargets"></g>
     </svg>
   </div>
@@ -1656,23 +1667,30 @@ function buildTrainMeta(){
         guard++;
         hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[prevIdx]], STATIONS[seq[curIdx]])/0.9));
         const nextPrevIdx = prevIdx-sign;
-        if(remaining<=hopMin*1.4 || nextPrevIdx<0 || nextPrevIdx>=seq.length) break;
+        // BROKEN HISTORY (2026-09-27/28): this used to break as soon as remaining<=hopMin*1.4 -- a deliberate
+        // 40% slack meant to survive the haversine/0.9 hop-time estimate being a little off. But that slack
+        // is exactly why every freshly-computed placement kept LOOKING freshly-departed no matter when it
+        // was computed: tick()'s frac = clamp(0,1, 1-curMin/hopMin) is pinned at 0 for as long as
+        // curMin>hopMin, and with up to 40% slack, `remaining` is almost ALWAYS above hopMin the instant a
+        // placement is (re)computed -- not just on first computation, but on literally every recompute,
+        // including a plain page reload, since this whole walk-back is stateless and re-derives "current
+        // position" from scratch from BART's own m value every time. Capping the stored value to hopMin
+        // (2026-09-27 patch) only changed what the pinned-at-0 case looked like -- it never removed the
+        // reason almost every hop WAS the pinned-at-0 case to begin with, so a page reload (which throws
+        // away any in-session continuity fix) kept showing every train sitting back at a ring on its segment's
+        // start station, then had to visibly "catch up" from there (reported 2026-09-27, repeatedly: "출발하는
+        //것처럼 보였던 열차는 없어지고 다시 또 링에서 시작한다"). Real fix: shrink the slack to just enough to
+        // absorb estimate noise (5%, not 40%) so `remaining` lands at or just under hopMin on its own --
+        // frac then starts as a smooth, small-but-nonzero fraction that reflects m at that instant, the same
+        // whether it's freshly loaded or mid-session, instead of being biased to the segment's start every
+        // single time.
+        if(remaining<=hopMin*1.05 || nextPrevIdx<0 || nextPrevIdx>=seq.length) break;
         remaining -= hopMin;
         curIdx = prevIdx;
         prevIdx = nextPrevIdx;
       }
       if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
-      // The walk-back above deliberately allows up to 1.4x hopMin of slack when picking WHICH segment the
-      // train is currently in (a tight exact match mis-picks the segment when the haversine/0.9 hop-time
-      // estimate is a little off) -- but passing that slack straight through into minutesAtFetch broke the
-      // RENDERING: tick()'s frac = clamp(0,1, 1-curMin/hopMin) is fully clamped to 0 for as long as
-      // curMin>hopMin, so the train's head sat pinned exactly on the segment's start station -- overlapping
-      // its dot with a solid colored circle -- for however much of that slack (up to 40% of one hop) real
-      // time hadn't yet burned through, even though the train had genuinely already departed. Confirmed as
-      // a real bug 2026-09-27 (report: a colored ring sitting on a station, overlapping its dot, even as
-      // that line's train was actively departing). Fix: cap what's actually stored to hopMin itself -- the
-      // slack above only ever picks the right segment, it never inflates the position within it.
-      const cappedRemaining = Math.min(remaining, hopMin);
+      const cappedRemaining = Math.min(remaining, hopMin); // residual safety net for the rare >hopMin edge case
       placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
     });
   });
