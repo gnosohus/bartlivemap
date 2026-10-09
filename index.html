@@ -1267,8 +1267,8 @@ function alertsForStation(sid){
   });
   return out;
 }
-// "cancel" = no trains (⛔), "last" = last trains of the night still listed (🌙), "delay" = possible service problem (⚠️).
-function alertIcon(type){ return type==="cancel" ? "⛔" : type==="last" ? "🌙" : "⚠️"; }
+// "cancel" = no trains (⛔), "last" = last trains of the night still listed (🏃‍♂️), "delay" = possible service problem (⚠️).
+function alertIcon(type){ return type==="cancel" ? "⛔" : type==="last" ? "🏃‍♂️" : "⚠️"; }
 // Top-right alerts bell/panel (renderAlertsPanel/openAlerts/closeAlerts) removed 2026-09-28 per user
 // request -- alerts now surface only inline per-station via alertsForStation()/renderPopupBody, using
 // activeAlerts()/scheduleClosures exactly as before. computeLiveAlerts() (called from the fetch cycle,
@@ -1577,6 +1577,14 @@ let trainMeta = {};
 // trainMeta itself which gets fully rebuilt each time. See its use in the clustering section below for why.
 let trackedTrains = {};
 let trackedTrainSeq = 0;
+let trackInitDone = false; // false only until the first build that has any reports (page just opened)
+// Real headway right now: BART runs Yellow/Orange/Blue every 20 min after 9 pm (and before opening there is nothing), so a
+// fixed daytime number would make the same-train tolerances far too tight at night. ASSUMPTION: 20 min evening headway.
+function headwayNow(lid){
+  const base = HEADWAY_BY_LINE[lid] || 20;
+  const t = pacificNow();
+  return (t.hour>=21 || t.hour<OPEN_HOUR_BY_DAY[t.day]) ? Math.max(base, 20) : base;
+}
 // BART's own ETD minutes is "time until arrival AT sid" -- for a train more than one hop out (common once
 // fetchETD keeps all of BART's real estimates, not just the soonest), the old version only ever checked the
 // single immediately-adjacent hop and silently dropped anything farther, which is why a station could show
@@ -1657,7 +1665,7 @@ function buildTrainMeta(){
   });
   const byLineDestRaw = {};
   rawReports.forEach(function(r){
-    const key = r.lid+"|"+r.e.destination;
+    const key = r.lid+"|"+r.sign;
     (byLineDestRaw[key] = byLineDestRaw[key]||[]).push(r);
   });
   const MERGE_TOL = 4; // minutes -- just per-hop estimate noise between two specific (usually adjacent)
@@ -1668,13 +1676,20 @@ function buildTrainMeta(){
     const kept = [];
     list.forEach(function(r){
       const prev = kept.length ? kept[kept.length-1] : null;
-      if(prev){
+      // Two entries in the SAME station's own list are by definition two different trains (BART lists each
+      // train once per station), however close their minutes are -- never merge those (2026-10-09).
+      if(!r._sids) r._sids = {};
+      r._sids[r.sid] = true;
+      if(prev && !prev._sids[r.sid]){
         // predicted m at r's station, walking forward from prev's station along the same direction
         const predicted = prev.m - pathTimeMin(prev.seq, prev.oi, r.oi);
         if(Math.abs(predicted - r.m) <= MERGE_TOL){
           // same physical train, seen from two stations -- keep whichever report is further along
           // (smaller m = more current position estimate), drop the other
-          if(r.m < prev.m) kept[kept.length-1] = r;
+          const chosen = r.m < prev.m ? r : prev;
+          const u = {}; Object.keys(prev._sids).forEach(function(k){ u[k]=true; }); u[r.sid] = true;
+          chosen._sids = u;
+          kept[kept.length-1] = chosen;
           return;
         }
       }
@@ -1684,7 +1699,7 @@ function buildTrainMeta(){
   });
   survivors.forEach(function(r){
       const sid = r.sid, oi = r.oi, lid = r.lid, seq = r.seq, di = r.di, sign = r.sign, m = r.m, e = r.e;
-      const totalToDest = m + pathTimeMin(seq, oi, di!==-1 ? di : (sign===1 ? seq.length-1 : 0));
+      const totalToDest = m + pathTimeMin(seq, oi, sign===1 ? seq.length-1 : 0);
       const rank = r.rank;
       let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
       // sid can BE the line's own origin terminus (e.g. a Millbrae-bound yellow train reported directly at
@@ -1705,6 +1720,13 @@ function buildTrainMeta(){
       // is already shown in the station's own popup (renderPopupBody, a separate code path that never went
       // through this walk-back to begin with).
       if(prevIdx<0 || prevIdx>=seq.length){
+        // 2026-10-09 (Suho's design): this is the ONLY place a brand-new train legitimately appears -- the
+        // origin terminus's own list says "a train departs in m min". Register it now as a pending train
+        // (departAt) so it already has an id when it leaves; it is not drawn until departAt (see tick()).
+        const nextIdx = oi + sign;
+        if(nextIdx<0 || nextIdx>=seq.length) return;
+        const hop0 = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[oi]], STATIONS[seq[nextIdx]])/0.9));
+        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[oi], sid:seq[nextIdx], minutesAtFetch:hop0, hopMin:hop0, totalToDest:totalToDest, m:m, rsid:sid, dir:sign, departAt: now + m*60000, spawn:true });
         return;
       }
       let brokeAtLineBoundary = false;
@@ -1751,11 +1773,11 @@ function buildTrainMeta(){
       // clean, fresh frac=0, same as any train that's actually just departed.
       const excess = remaining - hopMin;
       if(brokeAtLineBoundary && excess > hopMin*0.05){
-        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:hopMin, hopMin:hopMin, totalToDest:totalToDest, m:m, departAt: now + excess*60000 });
+        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:hopMin, hopMin:hopMin, totalToDest:totalToDest, m:m, rsid:sid, dir:sign, departAt: now + excess*60000, spawn:(curIdx===oi) });
         return;
       }
       const cappedRemaining = Math.min(remaining, hopMin); // residual safety net for the rare >hopMin edge case
-      placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m });
+      placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m, rsid:sid, dir:sign, spawn:(brokeAtLineBoundary && curIdx===oi) });
   });
   // Grouping strictly by (line, destination, rank) -- tried 2026-09-27 -- turned out to UNDER-count on a
   // long route: BART's estimate array is rank-ordered per REPORTING STATION, not system-wide, so "rank 0 at
@@ -1777,7 +1799,7 @@ function buildTrainMeta(){
   // 20min headway math), instead of 32 (flat +-2min, drift-broken) or 2 (rank-only, position-blind).
   const byLineDest = {};
   placements.forEach(function(p){
-    const key = p.lineId+"|"+p.destination;
+    const key = p.lineId+"|"+p.dir; // one physical queue per line+direction, whatever label BART puts on the destination
     (byLineDest[key] = byLineDest[key]||[]).push(p);
   });
   // DUPLICATE-TRAIN BUG (found 2026-09-28 from a real screenshot: Orinda reporting genuine 19-min and
@@ -1803,54 +1825,131 @@ function buildTrainMeta(){
   // own tracked entry instead of merging into (or duplicating next to) an unrelated one. A train that stops
   // being reported at all (arrived) is dropped after a short grace window below, not instantly, so one missed
   // poll doesn't flicker it away and reappear under a new id.
-  const TRACK_TOL = 3; // minutes
+  const TRACK_TOL = 3;        // minutes: tight match between a report and a tracked train's prediction
+  const MERGE_GAP = 4;        // minutes: ghost-merge distance (same line+direction)
+  const MISS_FOR_GHOST = 3;   // polls (~45 s) a tracked train must go unconfirmed before it can be a ghost
+  const SILENT_DROP_MS = 120000; // a tracked train nobody has reported for 2 min is gone (BART dropped it)
   const touchedIds = {};
+  const isInitialBuild = !trackInitDone;
+  const predictedNow = function(tt){ return tt.totalToDest - (now-tt.updateTime)/60000; };
+  // ID RULES (2026-10-09, Suho's design -- one real train must never become two):
+  //  1. A new id is created ONLY from an origin-terminus report ("departs in N min") that is later than every
+  //     known train, when the page was just opened (no memory yet), or when this line+destination has no
+  //     tracked train at all. Reports in the middle of a line never create a train.
+  //  2. Every other report is attached to the nearest still-unclaimed tracked train (tight pass, then a
+  //     half-headway pass), keeping trains in order (they cannot overtake). If none is free it is a duplicate
+  //     report and is discarded.
+  //  3. Two entries from the SAME station's list are always two trains -- never merged, however close.
+  //  4. Ghost merge: a tracked train that nobody has confirmed for 3 polls while another train of the same
+  //     line+direction within 4 min IS being confirmed is a leftover duplicate and is removed.
+  //  5. Removal is by information, not a short timer: at its predicted arrival, or after 2 min of silence.
   Object.keys(byLineDest).forEach(function(key){
     const lid = key.split("|")[0];
-    const tol = (HEADWAY_BY_LINE[lid]||20) * 0.5;
+    const tol = headwayNow(lid) * 0.5;
     const list = byLineDest[key].slice().sort(function(a,b){ return a.totalToDest-b.totalToDest; });
     const clusters = [];
     list.forEach(function(p){
       const rep = clusters.length ? clusters[clusters.length-1] : null;
-      if(!rep || p.totalToDest-rep.totalToDest>tol){
-        clusters.push(p); // still useful for collapsing same-INSTANT duplicate reports before tracking runs
-      } else if(p.m<rep.m){
-        clusters[clusters.length-1] = p; // a report closer to arrival is more current -- use its placement
+      if(!rep || p.totalToDest-rep.totalToDest>tol || rep._rs[p.rsid]){
+        p._rs = {}; p._rs[p.rsid] = true;
+        clusters.push(p); // same-station entries are different trains: never folded into one cluster
+      } else {
+        const spawn = !!(p.spawn || rep.spawn);
+        const rs = rep._rs; rs[p.rsid] = true;
+        const chosen = p.m<rep.m ? p : rep;
+        chosen._rs = rs; chosen.spawn = spawn;
+        clusters[clusters.length-1] = chosen;
       }
     });
     const existingIds = Object.keys(trackedTrains).filter(function(id){ return trackedTrains[id].key===key; });
-    const usedIds = [];
-    clusters.forEach(function(clusterRep){
-      let bestId = null, bestDiff = Infinity;
-      existingIds.forEach(function(id){
-        if(usedIds.indexOf(id)!==-1) return;
-        const tt = trackedTrains[id];
-        const predicted = tt.totalToDest - (now-tt.updateTime)/60000;
-        const diff = Math.abs(clusterRep.totalToDest-predicted);
-        if(diff<bestDiff){ bestDiff=diff; bestId=id; }
+    const predictedOf = function(id){ return predictedNow(trackedTrains[id]); };
+    const assign = {}, usedIds = {};
+    function assignPairs(maxDiff){
+      const pairs = [];
+      clusters.forEach(function(c,ci){
+        if(assign[ci]!==undefined) return;
+        existingIds.forEach(function(id){
+          if(usedIds[id]) return;
+          const d = Math.abs(c.totalToDest - predictedOf(id));
+          if(d<=maxDiff) pairs.push({ ci:ci, id:id, d:d });
+        });
       });
-      const old = (bestId!==null && bestDiff<=TRACK_TOL) ? trackedTrains[bestId] : null;
-      const id = old ? bestId : (key+"#"+(++trackedTrainSeq));
-      if(old) usedIds.push(bestId);
+      pairs.sort(function(a,b){ return a.d-b.d; });
+      pairs.forEach(function(pr){
+        if(assign[pr.ci]!==undefined || usedIds[pr.id]) return;
+        assign[pr.ci] = pr.id; usedIds[pr.id] = true;
+      });
+    }
+    assignPairs(TRACK_TOL);
+    assignPairs(tol);
+    // Trains cannot overtake: keep matched ids in the same order as their clusters.
+    const matched = Object.keys(assign).map(Number).sort(function(a,b){ return clusters[a].totalToDest-clusters[b].totalToDest; });
+    const sortedIds = matched.map(function(ci){ return assign[ci]; }).sort(function(a,b){ return predictedOf(a)-predictedOf(b); });
+    const reordered = matched.every(function(ci,i){ return Math.abs(clusters[ci].totalToDest - predictedOf(sortedIds[i]))<=tol; });
+    if(reordered){ matched.forEach(function(ci,i){ assign[ci] = sortedIds[i]; }); }
+    clusters.forEach(function(c,ci){
+      if(assign[ci]!==undefined || !c.spawn) return;
+      let best = null;
+      existingIds.forEach(function(id){
+        const t = trackedTrains[id];
+        if(usedIds[id] || !(t.departAt && t.departAt>now+60000)) return;
+        if(best===null || predictedOf(id)<predictedOf(best)) best = id;
+      });
+      if(best!==null){ assign[ci] = best; usedIds[best] = true; }
+    });
+    let maxPred = -Infinity;
+    existingIds.forEach(function(id){ maxPred = Math.max(maxPred, predictedOf(id)); });
+    const hadTracks = existingIds.length>0;
+    clusters.forEach(function(c,ci){
+      let id = assign[ci];
+      const old = id!==undefined ? trackedTrains[id] : null;
+      if(!old){
+        const allowSpawn = isInitialBuild || !hadTracks || (c.spawn && c.totalToDest > maxPred);
+        if(!allowSpawn) return; // duplicate/unexplained report: never create an id for it
+        id = key+"#"+(++trackedTrainSeq);
+        maxPred = Math.max(maxPred, c.totalToDest);
+      }
       touchedIds[id] = true;
+      const pendingNow = !!(c.departAt && c.departAt>now);
       trackedTrains[id] = {
-        key:key, lineId:clusterRep.lineId, prevId:clusterRep.prevId, sid:clusterRep.sid, hopMin:clusterRep.hopMin,
-        totalToDest:clusterRep.totalToDest, updateTime:now,
-        minutesAtFetch: old ? old.minutesAtFetch : clusterRep.minutesAtFetch,
-        fetchTime: old ? old.fetchTime : now,
-        departAt: old ? old.departAt : clusterRep.departAt
+        key:key, lineId:c.lineId, prevId:c.prevId, sid:c.sid, hopMin:c.hopMin,
+        totalToDest:c.totalToDest, updateTime:now,
+        // re-synced from the newest, closest report every poll; tick() glides toward it (no jumps)
+        minutesAtFetch:c.minutesAtFetch,
+        // a train still waiting at the terminus starts its hop at its departure moment, not now
+        fetchTime: pendingNow ? c.departAt : now,
+        departAt: pendingNow ? c.departAt : undefined,
+        miss:0,
+        created: old ? old.created : trackedTrainSeq
       };
     });
+    // miss counters
+    existingIds.forEach(function(id){
+      if(trackedTrains[id] && !touchedIds[id]) trackedTrains[id].miss = (trackedTrains[id].miss||0)+1;
+    });
+    // Ghost merge (rule 4)
+    const live = Object.keys(trackedTrains).filter(function(id){
+      const t = trackedTrains[id];
+      return t.key===key && !(t.departAt && t.departAt>now);
+    }).sort(function(a,b){ return predictedOf(a)-predictedOf(b); });
+    for(let i=0;i<live.length;i++){
+      for(let j=i+1;j<live.length;j++){
+        const A = trackedTrains[live[i]], B = trackedTrains[live[j]];
+        if(!A || !B) continue;
+        if(Math.abs(predictedNow(A)-predictedNow(B)) >= MERGE_GAP) break;
+        if(A.miss>=MISS_FOR_GHOST && B.miss===0){ delete trackedTrains[live[i]]; break; }
+        if(B.miss>=MISS_FOR_GHOST && A.miss===0){ delete trackedTrains[live[j]]; }
+      }
+    }
   });
-  // Grace window: a tracked train not confirmed by any report THIS cycle stays around for up to ~45s
-  // (3 missed polls) before being dropped, so one noisy/missing poll doesn't delete-and-recreate it under a
-  // new id (which would just reintroduce the old reset-to-frac-0 flicker this whole mechanism exists to
-  // avoid). Past that, it's gone for good -- assume arrived/exited.
+  // Rule 5: remove by information.
   Object.keys(trackedTrains).forEach(function(id){
-    if(!touchedIds[id] && now-trackedTrains[id].updateTime>45000){ delete trackedTrains[id]; }
+    const tt = trackedTrains[id];
+    if(predictedNow(tt) < -1 || now-tt.updateTime > SILENT_DROP_MS){ delete trackedTrains[id]; }
   });
   const meta = {};
   Object.keys(trackedTrains).forEach(function(id){ meta[id] = trackedTrains[id]; });
+  if(placements.length) trackInitDone = true;
   const shuttle = buildOakShuttleMeta(now);
   if(shuttle) meta["beige|shuttle"] = shuttle;
   trainMeta = meta;
@@ -2019,6 +2118,7 @@ function setStatus(live){
 
 const trainsG = document.getElementById("trains");
 const trainMarkers = {};
+const trainDisp = {}; // per tracked train: displayed (smoothed) position along its path, see tick()
 
 function refreshTrainFilter(){
   Object.keys(trainMarkers).forEach(function(k){
@@ -2077,7 +2177,30 @@ function tick(){
     // shortens the visible trail right after a terminus departure (physically correct: a train that just
     // left has a short trail) instead of collapsing to a static point (the original "ring") or freezing (the
     // regression above).
-    const headLen = Lprev + frac*(Lcur-Lprev);
+    let headLen = Lprev + frac*(Lcur-Lprev);
+    if(m.key){
+      // SMOOTHING (2026-10-09): never jump or go backward. The displayed head glides toward the position the
+      // newest data implies: it normally moves at the data's own speed (hop length / hop minutes), speeds up
+      // (max 2x) to catch up when behind, and slows down / waits when ahead. Only a gross mismatch (more
+      // than 1.5 hops ahead) snaps. First sighting = no smoothing.
+      const hopLen = Math.abs(Lcur-Lprev);
+      const targetU = dir*headLen;
+      let ds = trainDisp[key];
+      if(!ds || ds.dir!==dir){ ds = trainDisp[key] = { u:targetU, t:now, dir:dir }; }
+      else {
+        const dt = Math.min(1000, Math.max(0, now-ds.t));
+        const nominal = hopLen/(m.hopMin*60000)*dt;
+        const err = targetU - ds.u;
+        if(err < -1.5*hopLen){ ds.u = targetU; }
+        else {
+          let step = nominal + err*(dt/6000);
+          step = Math.max(0, Math.min(2*nominal, step));
+          ds.u += step;
+        }
+        ds.t = now;
+      }
+      headLen = dir*ds.u;
+    }
     let tailLen = headLen - dir*lineLen;
     tailLen = dir>0 ? Math.max(0, tailLen) : Math.min(total, tailLen);
     const SAMPLES = 10;
@@ -2110,7 +2233,7 @@ function tick(){
     const rec = trainMarkers[k];
     if(rec.expiring==null) rec.expiring = now;
     const elapsed = now-rec.expiring;
-    if(elapsed>900){ rec.el.remove(); delete trainMarkers[k]; }
+    if(elapsed>900){ rec.el.remove(); delete trainMarkers[k]; delete trainDisp[k]; }
     else{ rec.el.style.opacity = String(Math.max(0,1-elapsed/900)); }
   });
   requestAnimationFrame(tick);
