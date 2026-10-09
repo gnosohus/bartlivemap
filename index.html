@@ -1221,12 +1221,15 @@ function computeLiveAlerts(){
   });
   liveAlerts = [];
   scheduleClosures = [];
-  Object.keys(LINES).filter(function(lid){ return lid!=="beige" && !seenLines[lid]; }).forEach(function(lid){
+  Object.keys(LINES).filter(function(lid){ return lid!=="beige"; }).forEach(function(lid){
     const note = scheduleNote(lid);
     if(note){
-      // expected, by-schedule closure -- popup-only, not a global alert (see scheduleClosures above)
+      // Outside the line's published hours: show the schedule message even if a train is still being
+      // reported (2026-10-08, per user: a train that left before 9 pm keeps running to its far terminus, so
+      // it stays drawn on the map -- the message just tells people it's the last one). Popup-only, not a
+      // global alert (see scheduleClosures above).
       scheduleClosures.push({ id:"sched-"+lid, type:"cancel", scope:"line", lineId:lid, text:note });
-    } else {
+    } else if(!seenLines[lid]){
       liveAlerts.push({ id:"live-"+lid, type:"delay", scope:"line", lineId:lid,
         text:"No live train data right now — service may be suspended or delayed." });
     }
