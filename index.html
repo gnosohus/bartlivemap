@@ -1183,34 +1183,34 @@ let liveAlerts = [];
 // separate list and shown ONLY inline in the popup of a station that line actually serves.
 let scheduleClosures = [];
 function activeAlerts(){ return DEMO_ALERTS.concat(liveAlerts); }
-// Known, fixed BART schedule rules (published service patterns, not derived from live data) -- asked for
-// 2026-09-27 so a line with zero live data can be explained as "this is normal, it just doesn't run right
-// now by schedule" instead of the vaguer "may be suspended or delayed." Green Line (Berryessa <-> Daly City)
-// is currently a weekday commute-hours-only line with no weekend or evening service, which is exactly why it
-// shows zero estimates on a Sunday -- that's expected, not an outage.
+// Known, fixed BART schedule rules (published service patterns, not derived from live data). Corrected
+// 2026-10-08 per user, verified against bart.gov/schedules ("Every day until 9pm 5-Line Service /
+// 9pm-Midnight 3-Line Service") and BART's 2022 schedule-change notice (Yellow, Orange and Blue are the
+// 3 lines that run 9pm-midnight): Red AND Green both run EVERY day (not weekdays-only -- the old Green
+// rule here was wrong) but only until 9 pm; after that only Yellow/Orange/Blue run. System opening hours
+// per bart.gov: 5 am weekdays, 6 am Saturday, 8 am Sunday -- used here as Red/Green's first-train time
+// (bart.gov doesn't publish a separate per-line first-train time on the pages checked; this matches the
+// 2022 notice's "Red and Green run Sundays 8am-~9pm"). All times are PACIFIC time, never the visitor's own
+// clock. Outside this window a line with zero live data is "expected, not an outage"; INSIDE it, zero live
+// data falls through to computeLiveAlerts()'s "service may be suspended or delayed" warning instead.
 const SCHEDULE_RULES = {
-  green: {
-    weekdayOnly: true,
-    commuteHoursOnly: true,
-    // roughly BART's published AM/PM commute windows; used only to decide which message to show, not to
-    // hide/show trains -- live data always wins if trains actually appear outside these hours.
-    startHour: 5, endHour: 21,
-    // Line name is no longer baked into this sentence (2026-09-28) -- the popup now always prepends a
-    // bolded "<Line> Line" label of its own (see renderPopupBody), the same way for every alert type, so
-    // embedding it here too would have doubled it up ("Green Line: Green Line runs on weekdays...").
-    note: "Runs on weekdays during commute hours only — no weekend or evening service."
-  }
+  red:   { endHour:21 },
+  green: { endHour:21 }
 };
+const OPEN_HOUR_BY_DAY = [8,5,5,5,5,5,6]; // Sun..Sat, Pacific
+function pacificNow(){
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone:"America/Los_Angeles", weekday:"short", hour:"numeric", hourCycle:"h23" }).formatToParts(new Date());
+  const wd = parts.find(function(p){ return p.type==="weekday"; }).value;
+  const hr = parseInt(parts.find(function(p){ return p.type==="hour"; }).value, 10);
+  return { day:["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].indexOf(wd), hour:hr };
+}
 function scheduleNote(lid){
   const rule = SCHEDULE_RULES[lid];
   if(!rule) return null;
-  const now = new Date();
-  const day = now.getDay(); // 0=Sun .. 6=Sat
-  const hour = now.getHours();
-  const isWeekend = day===0 || day===6;
-  const outsideHours = hour<rule.startHour || hour>=rule.endHour;
-  if(rule.weekdayOnly && isWeekend) return rule.note;
-  if(rule.commuteHoursOnly && !isWeekend && outsideHours) return rule.note;
+  const t = pacificNow();
+  const open = OPEN_HOUR_BY_DAY[t.day];
+  if(t.hour>=rule.endHour) return "Runs every day until 9 pm — no service after 9 pm.";
+  if(t.hour<open) return "Not running yet — service starts at "+open+" am.";
   return null;
 }
 function computeLiveAlerts(){
@@ -1502,6 +1502,12 @@ function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); r
 // popup's rows) and buildTrainMeta (which places map markers) now call the SAME function and store the SAME
 // resolved id on the row (row.destSid) -- there is only one destSid per row now, computed once, so the map
 // and the popup can no longer disagree about what a row's destination actually is.
+// BART's own label for the Millbrae terminus is the combined "SFO/Millbrae" even when the train really does
+// run all the way to Millbrae (its machine-readable abbreviation says MLBR). Show the true terminal name.
+function prettyDest(text, sid){
+  if(sid==="MLBR" && /sfo/i.test(text||"")) return "Millbrae";
+  return text;
+}
 function resolveDestSid(destText, abbreviation){
   if(abbreviation && STATIONS[abbreviation]) return abbreviation;
   return findDestSid(destText);
@@ -1880,7 +1886,7 @@ async function fetchETD(){
           if(!lid) return;
           // rank is no longer used for train-identity matching (see buildTrainMeta) but is kept as a cheap
           // tie-breaker / diagnostic field.
-          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:etd.destination, minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes), rank:rank });
+          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:prettyDest(etd.destination, resolveDestSid(etd.destination, etd.abbreviation)), minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes), rank:rank });
         });
       });
       next[sid]=rows;
