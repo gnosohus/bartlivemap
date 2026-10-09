@@ -1229,34 +1229,36 @@ function lineName(lid){ return lid.charAt(0).toUpperCase()+lid.slice(1); }
 function lineDot(lid){ return '<i class="ldot" style="background:'+LINES[lid].color+'"></i>'; }
 function lineList(lids){ return lids.map(function(l){ return lineDot(l)+lineName(l); }).join(", "); }
 // Station popup alerts, GROUPED (2026-10-08, per user): never one row per line. Lines at this station that
-// are closed and start again at the same hour share one "No service" row ("All lines" when every line at
+// are closed and start again at the same hour share one "No trains" row ("All lines" when every line at
 // the station is closed); lines inside their hours with no data share one "Possible delay" row.
 // Closures show even while a last train is still reported (it stays drawn on the map).
 function alertsForStation(sid){
   const out = [];
   if(!liveMode) return out;
   const lids = STATIONS[sid].lines.filter(function(l){ return l!=="beige" && LINES[l]; });
-  // Closed line: "Last trains" while it still has a train listed at THIS station, "No service" once none is.
+  // Closed line: "Last trains" while it still has a train listed at THIS station, "No trains" once none is.
   const shown = {};
   (etdByStation[sid]||[]).forEach(function(e){ shown[e.lineId] = true; });
   const groups = {}; // key "title|resumeHour" -> { title, hour, lines }
   lids.forEach(function(l){
     const c = lineClosure(l);
     if(!c) return;
-    const title = shown[l] ? "Last trains" : "No service";
+    const title = shown[l] ? "Last trains" : "No trains";
     const key = title+"|"+c.resumeHour;
     (groups[key] = groups[key] || { title:title, hour:c.resumeHour, lines:[] }).lines.push(l);
   });
-  ["Last trains","No service"].forEach(function(t){
+  ["Last trains","No trains"].forEach(function(t){
     Object.keys(groups).filter(function(k){ return groups[k].title===t; }).forEach(function(k){
       const g = groups[k];
-      const who = g.lines.length===lids.length ? "All lines" : lineList(g.lines);
-      out.push({ type:(g.title==="Last trains" ? "last" : "cancel"), title:g.title, html: who+". Service starts again at "+g.hour+" am." });
+      // Single-line station: the line is obvious, so no name and no "All lines". Otherwise "All lines" only
+      // when every line at this station is in the group.
+      const who = lids.length===1 ? "" : (g.lines.length===lids.length ? "All lines. " : lineList(g.lines)+". ");
+      out.push({ type:(g.title==="Last trains" ? "last" : "cancel"), title:g.title, html: who+"Service starts again at "+g.hour+" am." });
     });
   });
   const delayed = lids.filter(function(l){ return noDataLines.indexOf(l)!==-1; });
   if(delayed.length){
-    out.push({ type:"delay", title:"Possible delay", html: lineList(delayed)+". No live data, service may be suspended or delayed." });
+    out.push({ type:"delay", title:"Possible delay", html: (lids.length===1 ? "" : lineList(delayed)+". ")+"No live data, service may be suspended or delayed." });
   }
   DEMO_ALERTS.forEach(function(a){
     if(a.scope==="station" ? a.stationId===sid : (a.scope==="line" && lids.indexOf(a.lineId)!==-1)){
@@ -1265,7 +1267,7 @@ function alertsForStation(sid){
   });
   return out;
 }
-// "cancel" = no service (⛔), "last" = last trains of the night still listed (🌙), "delay" = possible service problem (⚠️).
+// "cancel" = no trains (⛔), "last" = last trains of the night still listed (🌙), "delay" = possible service problem (⚠️).
 function alertIcon(type){ return type==="cancel" ? "⛔" : type==="last" ? "🌙" : "⚠️"; }
 // Top-right alerts bell/panel (renderAlertsPanel/openAlerts/closeAlerts) removed 2026-09-28 per user
 // request -- alerts now surface only inline per-station via alertsForStation()/renderPopupBody, using
