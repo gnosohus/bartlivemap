@@ -1236,15 +1236,23 @@ function alertsForStation(sid){
   const out = [];
   if(!liveMode) return out;
   const lids = STATIONS[sid].lines.filter(function(l){ return l!=="beige" && LINES[l]; });
-  const closedByHour = {};
+  // Closed line: "Last trains" while it still has a train listed at THIS station, "No service" once none is.
+  const shown = {};
+  (etdByStation[sid]||[]).forEach(function(e){ shown[e.lineId] = true; });
+  const groups = {}; // key "title|resumeHour" -> { title, hour, lines }
   lids.forEach(function(l){
     const c = lineClosure(l);
-    if(c){ (closedByHour[c.resumeHour] = closedByHour[c.resumeHour] || []).push(l); }
+    if(!c) return;
+    const title = shown[l] ? "Last trains" : "No service";
+    const key = title+"|"+c.resumeHour;
+    (groups[key] = groups[key] || { title:title, hour:c.resumeHour, lines:[] }).lines.push(l);
   });
-  Object.keys(closedByHour).forEach(function(h){
-    const group = closedByHour[h];
-    const who = group.length===lids.length ? "All lines" : lineList(group);
-    out.push({ type:"cancel", title:"No service", html: who+". Service starts again at "+h+" am." });
+  ["Last trains","No service"].forEach(function(t){
+    Object.keys(groups).filter(function(k){ return groups[k].title===t; }).forEach(function(k){
+      const g = groups[k];
+      const who = g.lines.length===lids.length ? "All lines" : lineList(g.lines);
+      out.push({ type:(g.title==="Last trains" ? "last" : "cancel"), title:g.title, html: who+". Service starts again at "+g.hour+" am." });
+    });
   });
   const delayed = lids.filter(function(l){ return noDataLines.indexOf(l)!==-1; });
   if(delayed.length){
@@ -1257,8 +1265,8 @@ function alertsForStation(sid){
   });
   return out;
 }
-// "cancel" = no service (⛔), "delay" = possible service problem (⚠️).
-function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
+// "cancel" = no service (⛔), "last" = last trains of the night still listed (🌙), "delay" = possible service problem (⚠️).
+function alertIcon(type){ return type==="cancel" ? "⛔" : type==="last" ? "🌙" : "⚠️"; }
 // Top-right alerts bell/panel (renderAlertsPanel/openAlerts/closeAlerts) removed 2026-09-28 per user
 // request -- alerts now surface only inline per-station via alertsForStation()/renderPopupBody, using
 // activeAlerts()/scheduleClosures exactly as before. computeLiveAlerts() (called from the fetch cycle,
