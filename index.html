@@ -67,6 +67,7 @@
   /* Top-right alerts bell/panel CSS removed 2026-09-28 (button + panel removed, see markup above) */
   #popup .alert-row{ display:flex; gap:8px; align-items:flex-start; background:#fdeaea; color:var(--ink);
     border-radius:10px; padding:8px 10px; font-size:12px; line-height:1.4; margin-bottom:10px; }
+  #popup .ldot{ display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:baseline; }
   #searchWrap{ position:absolute; top:14px; left:14px; z-index:7; width:min(420px, calc(100vw - 28px)); display:none; }
   #searchWrap.open{ display:block; }
   #searchWrap input{ width:100%; border:none; outline:none; border-radius:14px; padding:11px 14px; font-size:16px; box-shadow:var(--shadow); background:var(--card); color:var(--ink); font-family:inherit; }
@@ -1176,13 +1177,10 @@ document.getElementById("app").addEventListener("click", function(e){
 // directly from the real data instead of waiting on a separate advisory feed. DEMO_ALERTS stays as a manual
 // override list (empty by default) for the rare case someone wants to add a one-off note by hand.
 const DEMO_ALERTS = [];
-let liveAlerts = [];
 // Schedule-based closures (e.g. Green Line's weekday-only hours) are expected, not a service problem -- per
 // user request 2026-09-27, these no longer appear in the global alert button/panel at all (a dot + icon
 // there reads like something is wrong, when it's just the normal published schedule). They're kept in this
 // separate list and shown ONLY inline in the popup of a station that line actually serves.
-let scheduleClosures = [];
-function activeAlerts(){ return DEMO_ALERTS.concat(liveAlerts); }
 // Known, fixed BART schedule rules (published service patterns, not derived from live data). Corrected
 // 2026-10-08 per user, verified against bart.gov/schedules ("Every day until 9pm 5-Line Service /
 // 9pm-Midnight 3-Line Service") and BART's 2022 schedule-change notice (Yellow, Orange and Blue are the
@@ -1204,53 +1202,63 @@ function pacificNow(){
   const hr = parseInt(parts.find(function(p){ return p.type==="hour"; }).value, 10);
   return { day:["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].indexOf(wd), hour:hr };
 }
-function scheduleNote(lid){
-  const rule = SCHEDULE_RULES[lid];
-  if(!rule) return null;
+// Is this line outside its published running hours right now (Pacific)? Returns null when it is running,
+// else { resumeHour } = the hour (am) it starts again. Red/Green: closed from 9 pm until tomorrow's opening
+// hour; every line (incl. Yellow/Orange/Blue, which run until midnight) is closed from midnight until
+// today's opening hour. Weekday names are never shown -- only the hour.
+function lineClosure(lid){
+  if(lid==="beige") return null;
   const t = pacificNow();
-  const open = OPEN_HOUR_BY_DAY[t.day];
-  if(t.hour>=rule.endHour) return "Runs every day until 9 pm — no service after 9 pm.";
-  if(t.hour<open) return "Not running yet — service starts at "+open+" am.";
+  const rule = SCHEDULE_RULES[lid];
+  if(rule && t.hour>=rule.endHour) return { resumeHour: OPEN_HOUR_BY_DAY[(t.day+1)%7] };
+  if(t.hour < OPEN_HOUR_BY_DAY[t.day]) return { resumeHour: OPEN_HOUR_BY_DAY[t.day] };
   return null;
 }
+let noDataLines = []; // lines inside their running hours that have zero live trains system-wide
 function computeLiveAlerts(){
-  if(!liveMode){ liveAlerts = []; scheduleClosures = []; return; }
+  if(!liveMode){ noDataLines = []; return; }
   const seenLines = {};
   Object.keys(etdByStation).forEach(function(sid){
     etdByStation[sid].forEach(function(e){ seenLines[e.lineId] = true; });
   });
-  liveAlerts = [];
-  scheduleClosures = [];
-  Object.keys(LINES).filter(function(lid){ return lid!=="beige"; }).forEach(function(lid){
-    const note = scheduleNote(lid);
-    if(note){
-      // Outside the line's published hours: show the schedule message even if a train is still being
-      // reported (2026-10-08, per user: a train that left before 9 pm keeps running to its far terminus, so
-      // it stays drawn on the map -- the message just tells people it's the last one). Popup-only, not a
-      // global alert (see scheduleClosures above).
-      scheduleClosures.push({ id:"sched-"+lid, type:"cancel", scope:"line", lineId:lid, text:note });
-    } else if(!seenLines[lid]){
-      liveAlerts.push({ id:"live-"+lid, type:"delay", scope:"line", lineId:lid,
-        text:"No live train data right now — service may be suspended or delayed." });
+  noDataLines = Object.keys(LINES).filter(function(lid){
+    return lid!=="beige" && !lineClosure(lid) && !seenLines[lid];
+  });
+}
+function lineName(lid){ return lid.charAt(0).toUpperCase()+lid.slice(1); }
+function lineDot(lid){ return '<i class="ldot" style="background:'+LINES[lid].color+'"></i>'; }
+function lineList(lids){ return lids.map(function(l){ return lineDot(l)+lineName(l); }).join(", "); }
+// Station popup alerts, GROUPED (2026-10-08, per user): never one row per line. Lines at this station that
+// are closed and start again at the same hour share one "No service" row ("All lines" when every line at
+// the station is closed); lines inside their hours with no data share one "Possible delay" row.
+// Closures show even while a last train is still reported (it stays drawn on the map).
+function alertsForStation(sid){
+  const out = [];
+  if(!liveMode) return out;
+  const lids = STATIONS[sid].lines.filter(function(l){ return l!=="beige" && LINES[l]; });
+  const closedByHour = {};
+  lids.forEach(function(l){
+    const c = lineClosure(l);
+    if(c){ (closedByHour[c.resumeHour] = closedByHour[c.resumeHour] || []).push(l); }
+  });
+  Object.keys(closedByHour).forEach(function(h){
+    const group = closedByHour[h];
+    const who = group.length===lids.length ? "All lines" : lineList(group);
+    out.push({ type:"cancel", title:"No service", html: who+". Service starts again at "+h+" am." });
+  });
+  const delayed = lids.filter(function(l){ return noDataLines.indexOf(l)!==-1; });
+  if(delayed.length){
+    out.push({ type:"delay", title:"Possible delay", html: lineList(delayed)+". No live data, service may be suspended or delayed." });
+  }
+  DEMO_ALERTS.forEach(function(a){
+    if(a.scope==="station" ? a.stationId===sid : (a.scope==="line" && lids.indexOf(a.lineId)!==-1)){
+      out.push({ type:a.type, title:null, html:a.text });
     }
   });
+  return out;
 }
-// "cancel" = a red no-entry circle with a horizontal white bar (⛔) -- used for "this genuinely isn't
-// running right now" (a by-schedule closure, or the Oakland Connector outside its hours), never for a real
-// service problem. "delay" = a warning triangle (⚠️) -- reserved for an unexpected zero-data line, i.e. an
-// actual possible service issue, which is why it's the one that still surfaces in the global alert panel.
+// "cancel" = no service (⛔), "delay" = possible service problem (⚠️).
 function alertIcon(type){ return type==="cancel" ? "⛔" : "⚠️"; }
-function alertsForStation(sid){
-  const fromActive = activeAlerts().filter(function(a){
-    if(a.scope==="station") return a.stationId===sid;
-    if(a.scope==="line") return STATIONS[sid].lines.indexOf(a.lineId)!==-1;
-    return false;
-  });
-  const fromSchedule = scheduleClosures.filter(function(a){
-    return a.scope==="line" && STATIONS[sid].lines.indexOf(a.lineId)!==-1;
-  });
-  return fromActive.concat(fromSchedule);
-}
 // Top-right alerts bell/panel (renderAlertsPanel/openAlerts/closeAlerts) removed 2026-09-28 per user
 // request -- alerts now surface only inline per-station via alertsForStation()/renderPopupBody, using
 // activeAlerts()/scheduleClosures exactly as before. computeLiveAlerts() (called from the fetch cycle,
@@ -1346,12 +1354,11 @@ function formatHour12(h){
   return disp+" "+period;
 }
 function oakScheduleText(){
-  const now = new Date();
-  const [start, end] = oakHoursForDay(now.getDay());
-  const hour = now.getHours();
-  // No trailing period -- matches the style of a real row's minutes field ("4 min"), which never ends in
-  // punctuation either, so this reads as one more field in that field, not a separate sentence.
-  if(hour<start || hour>=end) return "Not running — starts "+formatHour12(start);
+  // Pacific time (not the visitor's clock) and the same wording as the line alerts: "Service starts again at 5 am".
+  const t = pacificNow();
+  const [start, end] = oakHoursForDay(t.day);
+  if(t.hour<start) return "Service starts again at "+start+" am";
+  if(t.hour>=end) return "Service starts again at "+oakHoursForDay((t.day+1)%7)[0]+" am";
   return "Every 4–5 min";
 }
 function renderPopupBody(sid){
@@ -1360,8 +1367,8 @@ function renderPopupBody(sid){
   // treatment for a schedule closure (e.g. Green) and a live-data anomaly (any line), so it's always clear
   // at a glance which line the alert is about, not just for the ones whose own sentence happened to name it.
   const alertHtml = alertsForStation(sid).map(function(a){
-    const lineLabel = a.scope==="line" ? '<b>'+a.lineId.charAt(0).toUpperCase()+a.lineId.slice(1)+' Line</b>: ' : '';
-    return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+lineLabel+a.text+'</span></div>';
+    const head = a.title ? '<b>'+a.title+'</b>: ' : '';
+    return '<div class="alert-row"><span>'+alertIcon(a.type)+'</span><span>'+head+a.html+'</span></div>';
   }).join("");
   const rows = etdByStation[sid]||[];
   // Formatted as a normal destination row (swatch + dest + gray min-style field), matching every other
@@ -1507,7 +1514,9 @@ function minutesToNum(v){ if(v==="Leaving") return 0.4; const n=parseFloat(v); r
 // and the popup can no longer disagree about what a row's destination actually is.
 // BART's own label for the Millbrae terminus is the combined "SFO/Millbrae" even when the train really does
 // run all the way to Millbrae (its machine-readable abbreviation says MLBR). Show the true terminal name.
-function prettyDest(text, sid){
+function prettyDest(text, sid, lid){
+  // Yellow goes to SFO while Red runs and to Millbrae when Red isn't running (after 9 pm / before opening).
+  if(lid==="yellow" && lineClosure("red") && /sfo|sf airport|millbrae/i.test(text||"")) return "Millbrae";
   if(sid==="MLBR" && /sfo/i.test(text||"")) return "Millbrae";
   return text;
 }
@@ -1848,10 +1857,9 @@ function buildTrainMeta(){
 const OAK_HEADWAY_MIN = 4.5; // BART's own published average wait
 const OAK_HOP_MIN = 1.5; // estimated one-way crossing time (not a real timed measurement)
 function buildOakShuttleMeta(now){
-  const d = new Date(now);
-  const [start, end] = oakHoursForDay(d.getDay());
-  const hour = d.getHours();
-  if(hour<start || hour>=end) return null;
+  const t = pacificNow();
+  const [start, end] = oakHoursForDay(t.day);
+  if(t.hour<start || t.hour>=end) return null;
   const headwayMs = OAK_HEADWAY_MIN*60000;
   const cycleIdx = Math.floor(now/headwayMs);
   const phase = (now%headwayMs)/headwayMs; // 0..1 through the current headway cycle
@@ -1889,7 +1897,7 @@ async function fetchETD(){
           if(!lid) return;
           // rank is no longer used for train-identity matching (see buildTrainMeta) but is kept as a cheap
           // tie-breaker / diagnostic field.
-          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:prettyDest(etd.destination, resolveDestSid(etd.destination, etd.abbreviation)), minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes), rank:rank });
+          rows.push({ lineId:lid, destSid:resolveDestSid(etd.destination, etd.abbreviation), destination:prettyDest(etd.destination, resolveDestSid(etd.destination, etd.abbreviation), lid), minutesLabel:minutesToLabel(est.minutes), minutesNum:minutesToNum(est.minutes), rank:rank });
         });
       });
       next[sid]=rows;
