@@ -1315,8 +1315,35 @@ function clearSolo(){
   updateFocusDots();
   refreshTrainFilter();
 }
-mapWrap.addEventListener("click", function(){
+/* TAP-TEST (2026-10-11): forgiving line tap. The invisible per-line hit strokes are only ~2-7px wide on a
+   phone, so lines (esp. the parallel orange/red corridors) were nearly impossible to tap. A tap that lands
+   on empty map now picks the NEAREST line centerline within TAP_PX screen px. Station dots/labels and the
+   existing line-hit strokes still handle their own clicks first (they stopPropagation). */
+const TAP_PX = 20;
+let _tapPts = null;
+function buildTapPts(){
+  _tapPts = [];
+  LINE_ORDER.forEach(function(lid){
+    const P = linePathEls[lid][0], tot = P.getTotalLength();
+    for(let L=0; L<=tot; L+=3){ const q = P.getPointAtLength(L); _tapPts.push([lid, q.x, q.y]); }
+  });
+}
+function nearestLineAt(cx, cy){
+  if(!_tapPts) buildTapPts();
+  const ctm = svg.getScreenCTM(); if(!ctm) return null;
+  const s = new DOMPoint(cx, cy).matrixTransform(ctm.inverse());
+  const ppu = ctm.a; // screen px per svg unit
+  let best = null, bd = Infinity;
+  for(let i=0;i<_tapPts.length;i++){
+    const p = _tapPts[i], dx = p[1]-s.x, dy = p[2]-s.y, d = dx*dx+dy*dy;
+    if(d<bd){ bd=d; best=p[0]; }
+  }
+  return (Math.sqrt(bd)*ppu <= TAP_PX) ? best : null;
+}
+mapWrap.addEventListener("click", function(e){
   if(dragMoved){ dragMoved=false; return; }
+  const nearLid = nearestLineAt(e.clientX, e.clientY);
+  if(nearLid){ setSolo(nearLid); return; }
   if(soloLines) clearSolo();
   if(popup.classList.contains("open")) closePopup();
 });
