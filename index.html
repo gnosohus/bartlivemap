@@ -1652,331 +1652,199 @@ function pathTimeMin(seq, fromIdx, toIdx){
   }
   return total;
 }
+// ============================================================================================
+// ETD CHAIN PLACEMENT (2026-10-11) -- the API is the single source of truth.
+// Old approach: walk each ETD report backwards with a haversine/0.9 "fake" hop time, then cluster the
+// reports by guessed time-to-destination. Measured against a live snapshot only 28% of the popup rows had a
+// matching drawn train (the rest were off by minutes or had no train at all), and trains reported
+// "Leaving" were drawn arriving instead of standing at the platform.
+// New approach:
+//  1. Per line+direction, walk the stations in travel order and CHAIN the same physical train's ETD rows:
+//     "A: N min" -> "B: N + hop min". Each chain is one real train (no duplicates, no invented trains).
+//  2. The hop time between neighbouring stations is LEARNED from those chains (median of B-A across the
+//     trains seen in the snapshot, smoothed over polls); the haversine estimate is only the starting prior.
+//  3. A train is placed from its FIRST (soonest) ETD row: it is `m` minutes from that station, so it sits
+//     m minutes back along the learned hop times. That row therefore matches the popup exactly, and the
+//     downstream stations match through the learned hops.
+//  4. "Leaving" = the train is standing at that platform right now: head on the station circle, departing.
+//  5. Orphan rows that the station upstream should have listed but did not are BART noise -> not drawn.
+//  6. Identity across 15 s polls: each tracked train predicts its ETA at the new first station; the new
+//     chain adopts the closest prediction (3 min, then 6 min). Unmatched tracked trains keep running on
+//     their own countdown for up to 2 min, then drop. tick() glides to each new target (no jumps).
+// ============================================================================================
+const hopLearned = {}; // "line|dir|stationA|stationB" -> learned minutes between adjacent stations (per line and direction: each is predicted by BART separately)
+function hopPrior(lid, seq, lo, hi){
+  return Math.max(1, Math.min(6, haversineKm(STATIONS[seq[lo]], STATIONS[seq[hi]])/0.9));
+}
+function hopKey(lid, seq, a, b){ return lid+"|"+(b>a?"+":"-")+"|"+seq[Math.min(a,b)]+"|"+seq[Math.max(a,b)]; }
+function hopMinOf(lid, seq, a, b){
+  let v = hopLearned[hopKey(lid, seq, a, b)];
+  if(v==null) v = hopLearned[hopKey(lid, seq, b, a)]; // same track, other direction
+  return v!=null ? v : hopPrior(lid, seq, Math.min(a,b), Math.max(a,b));
+}
+function hopSum(lid, seq, from, to){
+  let t = 0; const s = to>from ? 1 : -1;
+  for(let i=from; i!==to; i+=s) t += hopMinOf(lid, seq, i, i+s);
+  return t;
+}
 function buildTrainMeta(){
   const now = Date.now();
-  const placements = [];
-  // ---- Cross-station duplicate-report merge (added 2026-09-28, per Suho's own suggested direction) ----
-  // The Orinda bug: the SAME physical train gets reported by two different upstream stations in the same
-  // 15s poll (e.g. Lafayette says "19 min" and Walnut Creek says "22 min" for the same westbound train),
-  // and the OLD dedup (clustering by totalToDest = m + pathTimeMin(oi->destination) with a flat headway/2
-  // tolerance) compared each report's FULL remaining route to the final destination -- that sums hop-time
-  // estimate error over potentially 20+ hops, so two reports of one real train can land >8min apart in
-  // totalToDest even though they agree almost exactly on the one thing that actually matters: whether B's
-  // reported minutes are consistent with A's minutes minus the real hop-time between A and B specifically
-  // (a LOCAL check spanning only the few hops between the two reporting stations, not the whole route --
-  // far less accumulated error). Fix: before doing any walk-back, collect every raw ETD row per
-  // (line,destination), sort them by how far along the direction of travel their reporting station sits,
-  // and merge adjacent reports whose station-to-station timing is internally consistent -- i.e. treat them
-  // as one physical train and keep only the more advanced (smaller m) report, which is the more current
-  // read on where that train actually is. Two independently-arriving trains are always at least one
-  // headway apart, which is far outside this tight per-hop tolerance, so real distinct trains never merge.
-  // Verified 2026-09-28 against a mock repro of the exact Orinda screenshot (Lafayette 19min / Walnut Creek
-  // 22min drifted report of the same train / Philadelphia... [Pittsburg] 39min genuinely different train):
-  // merges down to 2 trains (correct), was 3 before this fix.
-  const rawReports = [];
+  // ---- 1. events per line+direction, indexed by station position ----
+  const groups = {};
   Object.keys(etdByStation).forEach(function(sid){
     etdByStation[sid].forEach(function(e){
-      const lid = e.lineId;
-      const seq = LINES[lid] && LINES[lid].stations;
+      const lid = e.lineId, seq = LINES[lid] && LINES[lid].stations;
       if(!seq) return;
       const oi = seq.indexOf(sid);
-      if(oi===-1) return;
-      let di = e.destSid ? seq.indexOf(e.destSid) : -1;
-      let sign = 1;
-      if(di!==-1 && di!==oi) sign = di>oi?1:-1; else sign = oi===0?1:-1;
-      const m = e.minutesNum;
-      if(m==null) return;
-      rawReports.push({ sid:sid, oi:oi, lid:lid, seq:seq, di:di, sign:sign, m:m, e:e,
-        rank: e.rank==null?0:e.rank, order: oi*sign });
+      if(oi===-1 || e.minutesNum==null) return;
+      const di = e.destSid ? seq.indexOf(e.destSid) : -1;
+      const sign = (di!==-1 && di!==oi) ? (di>oi?1:-1) : (oi===0?1:-1);
+      const leaving = e.minutesLabel==="Leaving";
+      const key = lid+"|"+sign;
+      const g = groups[key] || (groups[key] = { key:key, lid:lid, sign:sign, seq:seq, at:{} });
+      (g.at[oi] = g.at[oi] || []).push({ idx:oi, m:leaving?0:e.minutesNum, leaving:leaving, e:e });
     });
   });
-  const byLineDestRaw = {};
-  rawReports.forEach(function(r){
-    const key = r.lid+"|"+r.sign;
-    (byLineDestRaw[key] = byLineDestRaw[key]||[]).push(r);
-  });
-  const MERGE_TOL = 4; // minutes -- just per-hop estimate noise between two specific (usually adjacent)
-  // stations, not route-wide; still far tighter than a real headway (10-20min), so distinct trains never merge
-  const survivors = [];
-  Object.keys(byLineDestRaw).forEach(function(key){
-    const list = byLineDestRaw[key].slice().sort(function(a,b){ return a.order-b.order; });
-    const kept = [];
-    list.forEach(function(r){
-      const prev = kept.length ? kept[kept.length-1] : null;
-      // Two entries in the SAME station's own list are by definition two different trains (BART lists each
-      // train once per station), however close their minutes are -- never merge those (2026-10-09).
-      if(!r._sids) r._sids = {};
-      r._sids[r.sid] = true;
-      if(prev && !prev._sids[r.sid]){
-        // predicted m at r's station, walking forward from prev's station along the same direction
-        const predicted = prev.m - pathTimeMin(prev.seq, prev.oi, r.oi);
-        if(Math.abs(predicted - r.m) <= MERGE_TOL){
-          // same physical train, seen from two stations -- keep whichever report is further along
-          // (smaller m = more current position estimate), drop the other
-          const chosen = r.m < prev.m ? r : prev;
-          const u = {}; Object.keys(prev._sids).forEach(function(k){ u[k]=true; }); u[r.sid] = true;
-          chosen._sids = u;
-          kept[kept.length-1] = chosen;
-          return;
-        }
-      }
-      kept.push(r);
-    });
-    kept.forEach(function(r){ survivors.push(r); });
-  });
-  survivors.forEach(function(r){
-      const sid = r.sid, oi = r.oi, lid = r.lid, seq = r.seq, di = r.di, sign = r.sign, m = r.m, e = r.e;
-      const totalToDest = m + pathTimeMin(seq, oi, sign===1 ? seq.length-1 : 0);
-      const rank = r.rank;
-      let remaining = m, curIdx = oi, prevIdx = oi-sign, hopMin = null, guard = 0;
-      // sid can BE the line's own origin terminus (e.g. a Millbrae-bound yellow train reported directly at
-      // ANTC, yellow's own first station) -- there is no station "before" it on this line to walk back
-      // into, so the very first prevIdx is out of range immediately (guard never even runs once). This is a
-      // train still sitting at (or about to leave) its own origin terminus -- not yet under way.
-      // History: originally just `return`ed here (dropped silently) -- caused Millbrae-bound yellow trains
-      // to show no map marker at all (2026-09-27 fix attempt #1: placed it at sid as a zero-length hop
-      // instead). That zero-length placement then rendered as a FULL-SIZE train-shaped stroke sitting dead
-      // still on top of the station dot for however long BART kept reporting a small/decreasing countdown
-      // (real layover time) -- looked exactly like a frozen/stuck train (2026-09-28 fix attempt #2: kept the
-      // placement but shrank it to a small dot). Still looked like a bug on screen once zoomed in (an extra
-      // colored ring on some termini, changing "randomly" with which lines happened to be dwelling at that
-      // moment) -- user explicitly asked (2026-09-28) to just not show anything at all for a dwelling train,
-      // and only have it appear once it's actually left the platform. Back to dropping the placement, same
-      // as the very first version -- this is now the deliberate final answer, not the old bug: a dwelling
-      // train has genuinely not moved, so there's nothing on the map to draw for it; the departure countdown
-      // is already shown in the station's own popup (renderPopupBody, a separate code path that never went
-      // through this walk-back to begin with).
-      if(prevIdx<0 || prevIdx>=seq.length){
-        // 2026-10-09 (Suho's design): this is the ONLY place a brand-new train legitimately appears -- the
-        // origin terminus's own list says "a train departs in m min". Register it now as a pending train
-        // (departAt) so it already has an id when it leaves; it is not drawn until departAt (see tick()).
-        const nextIdx = oi + sign;
-        if(nextIdx<0 || nextIdx>=seq.length) return;
-        const hop0 = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[oi]], STATIONS[seq[nextIdx]])/0.9));
-        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[oi], sid:seq[nextIdx], minutesAtFetch:hop0, hopMin:hop0, totalToDest:totalToDest, m:m, rsid:sid, dir:sign, departAt: now + m*60000, spawn:true });
-        return;
-      }
-      let brokeAtLineBoundary = false;
-      while(prevIdx>=0 && prevIdx<seq.length && guard<40){
-        guard++;
-        hopMin = Math.max(1, Math.min(6, haversineKm(STATIONS[seq[prevIdx]], STATIONS[seq[curIdx]])/0.9));
-        const nextPrevIdx = prevIdx-sign;
-        // BROKEN HISTORY (2026-09-27/28): this used to break as soon as remaining<=hopMin*1.4 -- a deliberate
-        // 40% slack meant to survive the haversine/0.9 hop-time estimate being a little off. But that slack
-        // is exactly why every freshly-computed placement kept LOOKING freshly-departed no matter when it
-        // was computed: tick()'s frac = clamp(0,1, 1-curMin/hopMin) is pinned at 0 for as long as
-        // curMin>hopMin, and with up to 40% slack, `remaining` is almost ALWAYS above hopMin the instant a
-        // placement is (re)computed -- not just on first computation, but on literally every recompute,
-        // including a plain page reload, since this whole walk-back is stateless and re-derives "current
-        // position" from scratch from BART's own m value every time. Capping the stored value to hopMin
-        // (2026-09-27 patch) only changed what the pinned-at-0 case looked like -- it never removed the
-        // reason almost every hop WAS the pinned-at-0 case to begin with, so a page reload (which throws
-        // away any in-session continuity fix) kept showing every train sitting back at a ring on its segment's
-        // start station, then had to visibly "catch up" from there (reported 2026-09-27, repeatedly: "출발하는
-        //것처럼 보였던 열차는 없어지고 다시 또 링에서 시작한다"). Real fix: shrink the slack to just enough to
-        // absorb estimate noise (5%, not 40%) so `remaining` lands at or just under hopMin on its own --
-        // frac then starts as a smooth, small-but-nonzero fraction that reflects m at that instant, the same
-        // whether it's freshly loaded or mid-session, instead of being biased to the segment's start every
-        // single time.
-        if(remaining<=hopMin*1.05){ break; }
-        if(nextPrevIdx<0 || nextPrevIdx>=seq.length){ brokeAtLineBoundary = true; break; }
-        remaining -= hopMin;
-        curIdx = prevIdx;
-        prevIdx = nextPrevIdx;
-      }
-      if(prevIdx<0||prevIdx>=seq.length||hopMin==null) return;
-      // PENDING-DEPARTURE CASE (found 2026-09-28 from a real screenshot: West Dublin simultaneously
-      // reporting a genuine 2-min AND a genuine 22-min westbound train). This hop is the line's very own
-      // FIRST hop out of its terminus -- there's no earlier station to walk back into, so the loop above is
-      // forced to stop here (brokeAtLineBoundary) even when `remaining` is still much bigger than this hop's
-      // own travel time (hopMin). That leftover (`excess`) isn't travel time on this block -- it's time the
-      // train hasn't even left the terminus platform yet, since BART's "minutes to arrival at the first
-      // stop" bakes in however long it's still waiting to depart. Previously this got the same treatment as
-      // a genuinely-in-progress hop (capped to hopMin, drawn immediately at frac=0) -- so a real 22-min-out
-      // train and a real 2-min-out train both got forced onto the identical Dublin->West Dublin segment and
-      // rendered stacked on top of each other, looking like two trains leaving the terminus at once. Fix:
-      // don't draw it yet -- schedule its departure for `excess` minutes from now (departAt) and have
-      // tick() skip it entirely until that real moment arrives; once it does, it animates the hop from a
-      // clean, fresh frac=0, same as any train that's actually just departed.
-      const excess = remaining - hopMin;
-      if(brokeAtLineBoundary && excess > hopMin*0.05){
-        placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:hopMin, hopMin:hopMin, totalToDest:totalToDest, m:m, rsid:sid, dir:sign, departAt: now + excess*60000, spawn:(curIdx===oi) });
-        return;
-      }
-      const cappedRemaining = Math.min(remaining, hopMin); // residual safety net for the rare >hopMin edge case
-      placements.push({ lineId:lid, destination:e.destination, rank:rank, prevId:seq[prevIdx], sid:seq[curIdx], minutesAtFetch:cappedRemaining, hopMin:hopMin, totalToDest:totalToDest, m:m, rsid:sid, dir:sign, spawn:(brokeAtLineBoundary && curIdx===oi) });
-  });
-  // Grouping strictly by (line, destination, rank) -- tried 2026-09-27 -- turned out to UNDER-count on a
-  // long route: BART's estimate array is rank-ordered per REPORTING STATION, not system-wide, so "rank 0 at
-  // station A" and "rank 0 at station B" are only the same physical train if that train hasn't yet passed
-  // whichever of A/B is farther down the line. Confirmed against real captured Red-line data (2026-09-27):
-  // Red's Richmond<->Millbrae route takes ~100 real minutes end-to-end (seen directly in the totalToDest
-  // spread below) with a 20-min headway, so ~5 distinct trains are in transit each direction at once --
-  // grouping by rank alone (only 2-3 ranks tracked) collapsed multiple genuinely different trains together
-  // and under-counted (reported "too few trains" 2026-09-27).
-  //
-  // Back to clustering on totalToDest (m + a crude haversine-distance/0.9-km-per-min hop-time estimate to
-  // the destination), which IS a valid same-train test for reports from stations close enough together that
-  // the model's error stays small -- the problem before was a flat +-2min tolerance, too tight once that
-  // crude model's error accumulates over 20+ hops on a long route. Since real distinct trains are spaced
-  // ~one headway apart in totalToDest by definition, using HALF the line's own published headway as the
-  // tolerance (HEADWAY_BY_LINE, defined below) absorbs that accumulated drift while still being tight enough
-  // to never merge two genuinely different trains (which are never closer than one full headway apart).
-  // Verified against real Red-line data: this now finds 6 clusters per direction (matching the ~100min /
-  // 20min headway math), instead of 32 (flat +-2min, drift-broken) or 2 (rank-only, position-blind).
-  const byLineDest = {};
-  placements.forEach(function(p){
-    const key = p.lineId+"|"+p.dir; // one physical queue per line+direction, whatever label BART puts on the destination
-    (byLineDest[key] = byLineDest[key]||[]).push(p);
-  });
-  // DUPLICATE-TRAIN BUG (found 2026-09-28 from a real screenshot: Orinda reporting genuine 19-min and
-  // 39-min westbound trains, but the map showed what looked like the SAME train twice, back-to-back near
-  // Orinda). Root cause: BART reports one physical train's ETA independently at EVERY station along its
-  // approach, so the exact same train can produce two `placements` here (one walked back from Orinda's own
-  // report, one from Lafayette's or Walnut Creek's). The single-snapshot clustering below (totalToDest
-  // within half a headway) is only meant to catch that -- but each station's walk-back accumulates its own
-  // haversine-distance hop-time error over however many hops it is from the train, so two INDEPENDENT
-  // reports of the same train can drift apart by more than that tolerance on a long multi-hop route, and
-  // get counted as two different trains.
-  // FIX: keep a PERSISTENT, cross-cycle `trackedTrains` table (module-level, survives every 15s
-  // buildTrainMeta() call) instead of only ever comparing THIS cycle's reports against each other. Each
-  // tracked train predicts its own current totalToDest by simply counting down real elapsed time since its
-  // last confirmed update (`tt.totalToDest - elapsedMinutes` -- totalToDest is already "minutes remaining",
-  // so it should tick down 1:1 with the clock if nothing has changed). A fresh report is matched to whichever
-  // tracked train's PREDICTION it lands closest to, using a much TIGHTER tolerance (3 min) than the raw
-  // cross-station snapshot comparison -- tight is safe here because we're checking a real prediction against
-  // an observation, not two independently-derived one-shot estimates. This is exactly what a station "seeing
-  // a train pass" gives us for free: once real elapsed time confirms a train should have moved on, only a
-  // report consistent with that continued progress gets accepted as the same train; a second, spurious report
-  // of a train that's actually still further out won't match anything's prediction and correctly starts its
-  // own tracked entry instead of merging into (or duplicating next to) an unrelated one. A train that stops
-  // being reported at all (arrived) is dropped after a short grace window below, not instantly, so one missed
-  // poll doesn't flicker it away and reappear under a new id.
-  const TRACK_TOL = 3;        // minutes: tight match between a report and a tracked train's prediction
-  const MERGE_GAP = 4;        // minutes: ghost-merge distance (same line+direction)
-  const MISS_FOR_GHOST = 3;   // polls (~45 s) a tracked train must go unconfirmed before it can be a ghost
-  const SILENT_DROP_MS = 120000; // a tracked train nobody has reported for 2 min is gone (BART dropped it)
-  const touchedIds = {};
-  const isInitialBuild = !trackInitDone;
-  const predictedNow = function(tt){ return tt.totalToDest - (now-tt.updateTime)/60000; };
-  // ID RULES (2026-10-09, Suho's design -- one real train must never become two):
-  //  1. A new id is created ONLY from an origin-terminus report ("departs in N min") that is later than every
-  //     known train, when the page was just opened (no memory yet), or when this line+destination has no
-  //     tracked train at all. Reports in the middle of a line never create a train.
-  //  2. Every other report is attached to the nearest still-unclaimed tracked train (tight pass, then a
-  //     half-headway pass), keeping trains in order (they cannot overtake). If none is free it is a duplicate
-  //     report and is discarded.
-  //  3. Two entries from the SAME station's list are always two trains -- never merged, however close.
-  //  4. Ghost merge: a tracked train that nobody has confirmed for 3 polls while another train of the same
-  //     line+direction within 4 min IS being confirmed is a leftover duplicate and is removed.
-  //  5. Removal is by information, not a short timer: at its predicted arrival, or after 2 min of silence.
-  Object.keys(byLineDest).forEach(function(key){
-    const lid = key.split("|")[0];
-    const tol = headwayNow(lid) * 0.5;
-    const list = byLineDest[key].slice().sort(function(a,b){ return a.totalToDest-b.totalToDest; });
-    const clusters = [];
-    list.forEach(function(p){
-      const rep = clusters.length ? clusters[clusters.length-1] : null;
-      if(!rep || p.totalToDest-rep.totalToDest>tol || rep._rs[p.rsid]){
-        p._rs = {}; p._rs[p.rsid] = true;
-        clusters.push(p); // same-station entries are different trains: never folded into one cluster
-      } else {
-        const spawn = !!(p.spawn || rep.spawn);
-        const rs = rep._rs; rs[p.rsid] = true;
-        const chosen = p.m<rep.m ? p : rep;
-        chosen._rs = rs; chosen.spawn = spawn;
-        clusters[clusters.length-1] = chosen;
-      }
-    });
-    const existingIds = Object.keys(trackedTrains).filter(function(id){ return trackedTrains[id].key===key; });
-    const predictedOf = function(id){ return predictedNow(trackedTrains[id]); };
-    const assign = {}, usedIds = {};
-    function assignPairs(maxDiff){
-      const pairs = [];
-      clusters.forEach(function(c,ci){
-        if(assign[ci]!==undefined) return;
-        existingIds.forEach(function(id){
-          if(usedIds[id]) return;
-          const d = Math.abs(c.totalToDest - predictedOf(id));
-          if(d<=maxDiff) pairs.push({ ci:ci, id:id, d:d });
+  // ---- 2. chain the same train across consecutive stations ----
+  const chains = [], obs = {};
+  Object.keys(groups).forEach(function(key){
+    const g = groups[key], sign = g.sign, seq = g.seq, lid = g.lid;
+    const idxs = Object.keys(g.at).map(Number).sort(function(a,b){ return (a-b)*sign; });
+    let prevChains = [];
+    idxs.forEach(function(i){
+      const list = g.at[i].slice().sort(function(a,b){ return a.m-b.m; });
+      const cur = [], cand = [], cu = {}, eu = {};
+      prevChains.forEach(function(c,ci){
+        if(c.lastIdx!==i-sign) return;
+        const hop = hopMinOf(lid, seq, c.lastIdx, i);
+        list.forEach(function(ev,ei){
+          const d = Math.abs((ev.m-c.lastM)-hop);
+          if(d<=Math.min(5, Math.max(3.5, hop)) && ev.m>=c.lastM-0.5) cand.push({ ci:ci, ei:ei, d:d });
         });
       });
-      pairs.sort(function(a,b){ return a.d-b.d; });
-      pairs.forEach(function(pr){
-        if(assign[pr.ci]!==undefined || usedIds[pr.id]) return;
-        assign[pr.ci] = pr.id; usedIds[pr.id] = true;
+      cand.sort(function(a,b){ return a.d-b.d; });
+      cand.forEach(function(x){
+        if(cu[x.ci] || eu[x.ei]) return;
+        cu[x.ci] = eu[x.ei] = true;
+        const c = prevChains[x.ci], ev = list[x.ei];
+        const hk = hopKey(lid, seq, c.lastIdx, i);
+        (obs[hk] = obs[hk] || { lid:lid, seq:seq, a:c.lastIdx, b:i, v:[] }).v.push(ev.m-c.lastM);
+        c.events.push(ev); c.lastIdx = i; c.lastM = ev.m; cur.push(c);
       });
-    }
-    assignPairs(TRACK_TOL);
-    assignPairs(tol);
-    // Trains cannot overtake: keep matched ids in the same order as their clusters.
-    const matched = Object.keys(assign).map(Number).sort(function(a,b){ return clusters[a].totalToDest-clusters[b].totalToDest; });
-    const sortedIds = matched.map(function(ci){ return assign[ci]; }).sort(function(a,b){ return predictedOf(a)-predictedOf(b); });
-    const reordered = matched.every(function(ci,i){ return Math.abs(clusters[ci].totalToDest - predictedOf(sortedIds[i]))<=tol; });
-    if(reordered){ matched.forEach(function(ci,i){ assign[ci] = sortedIds[i]; }); }
-    clusters.forEach(function(c,ci){
-      if(assign[ci]!==undefined || !c.spawn) return;
-      let best = null;
-      existingIds.forEach(function(id){
-        const t = trackedTrains[id];
-        if(usedIds[id] || !(t.departAt && t.departAt>now+60000)) return;
-        if(best===null || predictedOf(id)<predictedOf(best)) best = id;
+      list.forEach(function(ev,ei){
+        if(eu[ei]) return;
+        const c = { g:g, events:[ev], lastIdx:i, lastM:ev.m };
+        chains.push(c); cur.push(c);
       });
-      if(best!==null){ assign[ci] = best; usedIds[best] = true; }
+      prevChains = cur;
     });
-    let maxPred = -Infinity;
-    existingIds.forEach(function(id){ maxPred = Math.max(maxPred, predictedOf(id)); });
-    const hadTracks = existingIds.length>0;
-    clusters.forEach(function(c,ci){
-      let id = assign[ci];
-      const old = id!==undefined ? trackedTrains[id] : null;
-      if(!old){
-        const allowSpawn = isInitialBuild || !hadTracks || (c.spawn && c.totalToDest > maxPred);
-        if(!allowSpawn) return; // duplicate/unexplained report: never create an id for it
-        id = key+"#"+(++trackedTrainSeq);
-        maxPred = Math.max(maxPred, c.totalToDest);
-      }
-      touchedIds[id] = true;
-      const pendingNow = !!(c.departAt && c.departAt>now);
-      trackedTrains[id] = {
-        key:key, lineId:c.lineId, prevId:c.prevId, sid:c.sid, hopMin:c.hopMin,
-        totalToDest:c.totalToDest, updateTime:now,
-        // re-synced from the newest, closest report every poll; tick() glides toward it (no jumps)
-        minutesAtFetch:c.minutesAtFetch,
-        // a train still waiting at the terminus starts its hop at its departure moment, not now
-        fetchTime: pendingNow ? c.departAt : now,
-        departAt: pendingNow ? c.departAt : undefined,
-        miss:0,
-        created: old ? old.created : trackedTrainSeq
-      };
-    });
-    // miss counters
-    existingIds.forEach(function(id){
-      if(trackedTrains[id] && !touchedIds[id]) trackedTrains[id].miss = (trackedTrains[id].miss||0)+1;
-    });
-    // Ghost merge (rule 4)
-    const live = Object.keys(trackedTrains).filter(function(id){
-      const t = trackedTrains[id];
-      return t.key===key && !(t.departAt && t.departAt>now);
-    }).sort(function(a,b){ return predictedOf(a)-predictedOf(b); });
-    for(let i=0;i<live.length;i++){
-      for(let j=i+1;j<live.length;j++){
-        const A = trackedTrains[live[i]], B = trackedTrains[live[j]];
-        if(!A || !B) continue;
-        if(Math.abs(predictedNow(A)-predictedNow(B)) >= MERGE_GAP) break;
-        if(A.miss>=MISS_FOR_GHOST && B.miss===0){ delete trackedTrains[live[i]]; break; }
-        if(B.miss>=MISS_FOR_GHOST && A.miss===0){ delete trackedTrains[live[j]]; }
-      }
-    }
   });
-  // Rule 5: remove by information.
+  // ---- 3. learn the real hop times (median of observed station-to-station differences) ----
+  Object.keys(obs).forEach(function(hk){
+    const o = obs[hk], a = o.v.slice().sort(function(x,y){ return x-y; });
+    const prior = hopPrior(o.lid, o.seq, Math.min(o.a,o.b), Math.max(o.a,o.b));
+    const med = Math.max(0.5*prior, Math.min(2.5*prior, a[a.length>>1]));
+    const target = Math.max(0.7, Math.min(12, med));
+    const w = a.length>=3 ? 0.5 : (a.length===2 ? 0.4 : 0.25); // more samples -> trust the data more
+    const old = hopLearned[hk];
+    hopLearned[hk] = (old==null ? prior : old)*(1-w) + target*w;
+  });
+  // ---- 4. place each chain from its first (soonest) ETD row ----
+  const found = [];
+  chains.forEach(function(c){
+    const g = c.g, seq = g.seq, sign = g.sign, lid = g.lid;
+    const first = c.events[0], i0 = first.idx;
+    let pl = null;
+    if(first.leaving){
+      // standing at the platform right now, doors closing: head on the circle, run starts immediately
+      const ni = i0+sign;
+      if(ni<0 || ni>=seq.length) return; // standing at its terminus: nothing to draw
+      const hop = hopMinOf(lid, seq, i0, ni);
+      const dw = Math.min(dwellSec(seq[i0], lid), hop*30);
+      // if the chain already has the next station's row, arrive exactly when BART says (even if that means
+      // standing longer than usual); tick() keeps the head on the circle until the run has to start
+      const nxt = c.events[1];
+      const arrive = (nxt && nxt.idx===ni) ? nxt.m : hop-dw/60;
+      pl = { prevId:seq[i0], sid:seq[ni], hopMin:hop, minutesAtFetch:Math.max(0.05, arrive) };
+    } else {
+      const up = i0-sign;
+      if(up>=0 && up<seq.length){
+        // ghost check: the station upstream should already list this train if it is inside its horizon
+        const hopIn = hopMinOf(lid, seq, up, i0);
+        if(first.m > hopIn+4){
+          const ul = g.at[up];
+          if(ul){
+            const horizon = ul.length>=3 ? Math.max.apply(null, ul.map(function(x){ return x.m; })) : Infinity;
+            if(first.m-hopIn <= horizon+0.5) return; // upstream should have shown it: BART noise
+          }
+        }
+      }
+      let rem = first.m, cur = i0, guard = 0;
+      for(;;){
+        const p = cur-sign;
+        if(p<0 || p>=seq.length){
+          // origin terminus: the train is waiting there and departs in `rem` min
+          const ni = cur+sign;
+          if(ni<0 || ni>=seq.length) return;
+          const hop = hopMinOf(lid, seq, cur, ni);
+          pl = { prevId:seq[cur], sid:seq[ni], hopMin:hop, minutesAtFetch:hop, departAt:now+rem*60000 };
+          break;
+        }
+        const hop = hopMinOf(lid, seq, p, cur);
+        if(rem<=hop*1.05 || ++guard>60){
+          pl = { prevId:seq[p], sid:seq[cur], hopMin:hop, minutesAtFetch:Math.min(rem,hop) };
+          break;
+        }
+        rem -= hop; cur = p;
+      }
+    }
+    found.push({ g:g, lid:lid, sign:sign, i0:i0, m0:first.m, pl:pl });
+  });
+  // ---- 5. identity across polls ----
+  const etaAt = function(tt, i, seq){ return tt.m0 - (now-tt.t)/60000 + hopSum(tt.lid, seq, tt.i0, i); };
+  const used = {}, assign = new Array(found.length);
+  [3, 6].forEach(function(tol){
+    const pairs = [];
+    found.forEach(function(f,fi){
+      if(assign[fi]!==undefined) return;
+      Object.keys(trackedTrains).forEach(function(id){
+        const tt = trackedTrains[id];
+        if(used[id] || tt.key!==f.g.key) return;
+        if((f.i0-tt.i0)*f.sign<0) return; // never match a train to a station behind it
+        const d = Math.abs(etaAt(tt, f.i0, f.g.seq)-f.m0);
+        if(d<=tol) pairs.push({ fi:fi, id:id, d:d });
+      });
+    });
+    pairs.sort(function(a,b){ return a.d-b.d; });
+    pairs.forEach(function(pr){
+      if(assign[pr.fi]!==undefined || used[pr.id]) return;
+      assign[pr.fi] = pr.id; used[pr.id] = true;
+    });
+  });
+  const touched = {};
+  found.forEach(function(f,fi){
+    let id = assign[fi];
+    if(id===undefined) id = f.g.key+"#"+(++trackedTrainSeq);
+    touched[id] = true;
+    const pl = f.pl;
+    trackedTrains[id] = {
+      key:f.g.key, lid:f.lid, lineId:f.lid, sign:f.sign, i0:f.i0, m0:f.m0, t:now, updateTime:now,
+      prevId:pl.prevId, sid:pl.sid, hopMin:pl.hopMin, minutesAtFetch:pl.minutesAtFetch,
+      fetchTime: pl.departAt ? pl.departAt : now, departAt: pl.departAt, miss:0
+    };
+  });
+  // trains nobody reported this poll keep running on their own countdown for 2 min, then go
   Object.keys(trackedTrains).forEach(function(id){
     const tt = trackedTrains[id];
-    if(predictedNow(tt) < -1 || now-tt.updateTime > SILENT_DROP_MS){ delete trackedTrains[id]; }
+    if(!touched[id]){
+      tt.miss = (tt.miss||0)+1;
+      const arrived = tt.fetchTime + tt.minutesAtFetch*60000 < now-60000;
+      if(now-tt.t > 120000 || arrived) delete trackedTrains[id];
+    }
   });
   const meta = {};
   Object.keys(trackedTrains).forEach(function(id){ meta[id] = trackedTrains[id]; });
-  if(placements.length) trackInitDone = true;
+  if(found.length) trackInitDone = true;
   const shuttle = buildOakShuttleMeta(now);
   if(shuttle) meta["beige|shuttle"] = shuttle;
   trainMeta = meta;
