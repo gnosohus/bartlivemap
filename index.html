@@ -2147,6 +2147,18 @@ const trainsG = document.getElementById("trains");
 const trainMarkers = {};
 const trainDisp = {}; // per tracked train: displayed (smoothed) position along its path, see tick()
 
+// STATION DWELL (2026-10-11): every train stands at every station it serves, head exactly on the station
+// circle, then departs. Dwell is the FIRST part of each hop (time standing at the hop's origin station);
+// the remaining part is the run, eased so it brakes to a stop on the next circle. The hop's total time and
+// its arrival moment (BART's "N min") are unchanged -- dwell is carved out of the hop, not added to it.
+// Tune here: busy hubs 45-75 s, other stations 25-45 s (deterministic per station, so no flicker).
+const DWELL_BUSY = {EMBR:1, MONT:1, POWL:1, CIVC:1, "12TH":1, "19TH":1, MCAR:1, BALB:1};
+function dwellSec(stationId, lineId){
+  if(lineId==="beige") return 0;
+  let h = 0; for(let i=0;i<stationId.length;i++) h = (h*31 + stationId.charCodeAt(i))>>>0;
+  return DWELL_BUSY[stationId] ? 45 + h%31 : 25 + h%21;
+}
+
 function refreshTrainFilter(){
   Object.keys(trainMarkers).forEach(function(k){
     trainMarkers[k].el.style.display = (soloLines && soloLines.indexOf(trainMarkers[k].lineId)===-1) ? "none" : "";
@@ -2172,7 +2184,11 @@ function tick(){
     if(Lprev==null || Lcur==null) return;
     const elapsedMin = (now-m.fetchTime)/60000;
     const curMin = Math.max(0, m.minutesAtFetch-elapsedMin);
-    const frac = Math.max(0, Math.min(1, 1-(curMin/m.hopMin)));
+    // dwell at origin (head pinned on the circle), then an eased run (zero speed at both ends)
+    const hopSec = m.hopMin*60;
+    const dwell = Math.min(dwellSec(m.prevId, m.lineId), hopSec*0.5);
+    const runU = Math.max(0, Math.min(1, (hopSec - curMin*60 - dwell)/(hopSec - dwell)));
+    const frac = runU*runU*(3-2*runU);
     // v37b: same visual thickness the circle used (st.dotR is the station radius; trains ran ~1.7x that
     // as a radius, so *2 for diameter), now stretched into a head→tail gradient trail — length = 2x its
     // own thickness — colored in the train's own line color, riding the thin colored rail.
@@ -2216,13 +2232,15 @@ function tick(){
       if(!ds || ds.dir!==dir){ ds = trainDisp[key] = { u:targetU, t:now, dir:dir }; }
       else {
         const dt = Math.min(1000, Math.max(0, now-ds.t));
-        const nominal = hopLen/(m.hopMin*60000)*dt;
+        const nominal = hopLen/((hopSec - dwell)*1000)*dt; // average RUN speed (dwell excluded)
         const err = targetU - ds.u;
         if(err < -1.5*hopLen){ ds.u = targetU; }
         else {
           let step = nominal + err*(dt/6000);
-          step = Math.max(0, Math.min(2*nominal, step));
+          step = Math.max(0, Math.min(3*nominal, step));
           ds.u += step;
+          // never ahead of the data: a stopped train must sit exactly on its circle, not drift past it
+          if(ds.u > targetU) ds.u = targetU;
         }
         ds.t = now;
       }
