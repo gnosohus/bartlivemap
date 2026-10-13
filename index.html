@@ -1687,6 +1687,37 @@ function hopSum(lid, seq, from, to){
   for(let i=from; i!==to; i+=s) t += hopMinOf(lid, seq, i, i+s);
   return t;
 }
+
+// PLATFORM KEYS (2026-10-13): lines share track, but "same direction" is not the same as "same sign" -- blue and
+// orange run opposite ways along the shared Lake Merritt-Bay Fair track. A platform/track direction at a
+// station is identified by the through-movements (A -> S -> B) that use it; two movements that share the
+// incoming edge (A->S) or the outgoing edge (S->B) are the same platform. Built once from the line sequences.
+let _platUF = null;
+function platformKey(lid, seq, i, sign){
+  if(!_platUF){
+    const parent = {};
+    const find = function(x){ while(parent[x]!==x){ parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    const add = function(x){ if(parent[x]===undefined) parent[x] = x; };
+    const union = function(a,b){ add(a); add(b); const ra = find(a), rb = find(b); if(ra!==rb) parent[ra] = rb; };
+    Object.keys(LINES).forEach(function(id){
+      if(id==="beige") return;
+      const sq = LINES[id].stations;
+      [1,-1].forEach(function(d){
+        for(let k=0;k<sq.length;k++){
+          const A = sq[k-d], B = sq[k+d], S = sq[k];
+          const mv = "mv:"+(A||"^")+">"+S+">"+(B||"$");
+          add(mv);
+          if(A) union(mv, "in:"+A+">"+S);
+          if(B) union(mv, "out:"+S+">"+B);
+        }
+      });
+    });
+    _platUF = { find:find, has:function(x){ return parent[x]!==undefined; } };
+  }
+  const A = seq[i-sign], B = seq[i+sign], S = seq[i];
+  const mv = "mv:"+(A||"^")+">"+S+">"+(B||"$");
+  return _platUF.has(mv) ? _platUF.find(mv) : S+"|"+sign;
+}
 function buildTrainMeta(){
   const now = Date.now();
   // ---- 1. events per line+direction, indexed by station position ----
@@ -1798,8 +1829,77 @@ function buildTrainMeta(){
         rem -= hop; cur = p;
       }
     }
-    found.push({ g:g, lid:lid, sign:sign, i0:i0, m0:first.m, pl:pl });
+    found.push({ g:g, lid:lid, sign:sign, i0:i0, m0:first.m, n:c.events.length, pl:pl });
   });
+  // ---- 4b. physical consistency: one train can only be in one place ----
+  // (a) The same line+direction never has two trains within 4 min of each other: that is one train seen twice
+  //     (chain broken by BART's rounding noise) -> keep the better-supported one (longer chain, then the
+  //     more current report). Seen on the live map as 2-3 yellow trains stacked between two stations.
+  const nowCur = function(f){ return f.pl.departAt ? (f.pl.departAt-now)/60000 + f.pl.hopMin : f.pl.minutesAtFetch; };
+  const tToEnd = function(f){
+    const seq = f.g.seq, ni = seq.indexOf(f.pl.sid), end = f.sign>0 ? seq.length-1 : 0;
+    return nowCur(f) + hopSum(f.lid, seq, ni, end);
+  };
+  found.forEach(function(f){ f.T = tToEnd(f); });
+  const byKey = {};
+  found.forEach(function(f){ (byKey[f.g.key] = byKey[f.g.key] || []).push(f); });
+  const survivors = [];
+  Object.keys(byKey).forEach(function(k){
+    const arr = byKey[k].slice().sort(function(a,b){ return a.T-b.T; });
+    const keep = [];
+    arr.forEach(function(f){
+      const last = keep.length ? keep[keep.length-1] : null;
+      if(last && f.T-last.T < 4){
+        if(f.n>last.n || (f.n===last.n && f.m0<last.m0)) keep[keep.length-1] = f;
+        return;
+      }
+      keep.push(f);
+    });
+    keep.forEach(function(f){ survivors.push(f); });
+  });
+  found.length = 0; survivors.forEach(function(f){ found.push(f); });
+  // (b) Lines share the same physical track (yellow/red/orange on MacArthur-19th-12th, blue/green...): two
+  //     trains on the same track segment need at least ~1.2 min between them. Hold the later one back.
+  const bySeg = {};
+  found.forEach(function(f){ if(!f.pl.departAt) (bySeg[f.pl.prevId+">"+f.pl.sid] = bySeg[f.pl.prevId+">"+f.pl.sid] || []).push(f); });
+  Object.keys(bySeg).forEach(function(k){
+    const arr = bySeg[k].slice().sort(function(a,b){ return a.pl.minutesAtFetch-b.pl.minutesAtFetch; });
+    for(let i=1;i<arr.length;i++){
+      // also longer than the platform dwell, so two trains are never both "standing" at the same platform
+      const need = Math.max(1.2, dwellSec(arr[i].pl.prevId, arr[i].lid)/60 + 0.2);
+      const gap = arr[i].pl.minutesAtFetch - arr[i-1].pl.minutesAtFetch;
+      if(gap<need) arr[i].pl.minutesAtFetch = arr[i-1].pl.minutesAtFetch + need;
+    }
+  });
+  // (c) Platform exclusion across ALL lines: one platform holds one train at a time. A train occupies the
+  //     platform at its next station from its arrival until it has finished its dwell, and the platform it is
+  //     still standing at if it has not left yet. If two intervals overlap, hold the later train back.
+  for(let pass=0; pass<5; pass++){
+    const iv = [];
+    found.forEach(function(f){
+      const pl = f.pl; if(pl.departAt) return;
+      const seq = f.g.seq, sign = f.sign, is = seq.indexOf(pl.sid), ip = seq.indexOf(pl.prevId);
+      const cur = pl.minutesAtFetch, Dp = Math.min(dwellSec(pl.prevId, f.lid), pl.hopMin*30)/60;
+      iv.push({ f:f, key:platformKey(f.lid, seq, is, sign), a:cur, b:cur+dwellSec(pl.sid, f.lid)/60 });
+      if(cur>pl.hopMin-Dp) iv.push({ f:f, key:platformKey(f.lid, seq, ip, sign), a:0, b:cur-(pl.hopMin-Dp) });
+    });
+    const byPlat = {};
+    iv.forEach(function(x){ (byPlat[x.key] = byPlat[x.key] || []).push(x); });
+    let moved = false; const shifted = new Set();
+    Object.keys(byPlat).forEach(function(k){
+      const arr = byPlat[k].sort(function(x,y){ return x.a-y.a || x.b-y.b; });
+      for(let i=1;i<arr.length;i++){
+        const p = arr[i-1], c = arr[i];
+        if(c.f===p.f || shifted.has(c.f)) continue;
+        const need = p.b + 0.15 - c.a;
+        if(need>0 && (c.f.shiftTot||0)+need<=4){
+          c.f.pl.minutesAtFetch += need; c.f.shiftTot = (c.f.shiftTot||0)+need;
+          shifted.add(c.f); moved = true;
+        }
+      }
+    });
+    if(!moved) break;
+  }
   // ---- 5. identity across polls ----
   const etaAt = function(tt, i, seq){ return tt.m0 - (now-tt.t)/60000 + hopSum(tt.lid, seq, tt.i0, i); };
   const used = {}, assign = new Array(found.length);
@@ -1839,7 +1939,14 @@ function buildTrainMeta(){
     if(!touched[id]){
       tt.miss = (tt.miss||0)+1;
       const arrived = tt.fetchTime + tt.minutesAtFetch*60000 < now-60000;
-      if(now-tt.t > 120000 || arrived) delete trackedTrains[id];
+      if(now-tt.t > 60000 || arrived){ delete trackedTrains[id]; return; }
+      // a stale train that now overlaps a freshly reported one of the same line+direction is its ghost
+      const seq = LINES[tt.lid].stations, ni = seq.indexOf(tt.sid), end = tt.sign>0 ? seq.length-1 : 0;
+      const cur = Math.max(0, tt.minutesAtFetch-(now-tt.fetchTime)/60000);
+      const T = cur + hopSum(tt.lid, seq, ni, end);
+      for(let i=0;i<found.length;i++){
+        if(found[i].g.key===tt.key && Math.abs(found[i].T-T)<4){ delete trackedTrains[id]; return; }
+      }
     }
   });
   const meta = {};
